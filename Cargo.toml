@@ -1,0 +1,34 @@
+[package]
+name = "rosetta-mq"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "rosetta_mq"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rosetta-mq"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:tracing-subscriber", "dep:anyhow"]
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "time"] }
+rumqttc = "0.25"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+thiserror = "2"
+tracing = "0.1"
+hex = "0.4"
+bytes = "1"
+clap = { version = "4", features = ["derive"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+anyhow = { version = "1", optional = true }
+
+[dev-dependencies]
+rumqttd = "0.19"
