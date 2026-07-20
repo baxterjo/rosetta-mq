@@ -1,3 +1,5 @@
+use rumqttc::Publish;
+
 use crate::decoder::{DecodeError, Decoder};
 
 /// Always succeeds; renders the payload as a hex dump. Proves the registry/pipeline wiring
@@ -9,22 +11,25 @@ impl Decoder for HexDumpDecoder {
         "hexdump"
     }
 
-    fn decode(&self, payload: &[u8]) -> Result<String, DecodeError> {
+    fn decode(&self, publish: &Publish) -> Result<String, DecodeError> {
         Ok(format!(
             "{} ({} bytes)",
-            hex::encode(payload),
-            payload.len()
+            hex::encode(&publish.payload),
+            publish.payload.len()
         ))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use rumqttc::QoS;
+
     use super::*;
 
     #[test]
     fn hexdump_always_succeeds() {
-        let out = HexDumpDecoder.decode(&[0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+        let publish = Publish::new("devices/42/raw", QoS::AtLeastOnce, [0xDE, 0xAD, 0xBE, 0xEF]);
+        let out = HexDumpDecoder.decode(&publish).unwrap();
         assert_eq!(out, "deadbeef (4 bytes)");
     }
 }

@@ -134,7 +134,11 @@ async fn subscribe_decode_republish_end_to_end() {
         loop {
             match test_eventloop.poll().await {
                 Ok(Event::Incoming(Packet::Publish(publish))) => {
-                    if tx.send((publish.topic, publish.payload.to_vec())).await.is_err() {
+                    if tx
+                        .send((publish.topic, publish.payload.to_vec()))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -149,7 +153,7 @@ async fn subscribe_decode_republish_end_to_end() {
         .await
         .unwrap();
     test_client
-        .subscribe("devices/42/raw/error", QoS::AtLeastOnce)
+        .subscribe("devices/42/raw/decode_error", QoS::AtLeastOnce)
         .await
         .unwrap();
     // Subscribed with the same '#' breadth as the pipeline's own mapping, so this would also
@@ -178,7 +182,12 @@ async fn subscribe_decode_republish_end_to_end() {
     // 5. Failure path: invalid UTF-8 is never dropped -- it's republished, error-annotated, to
     // the reserved `.../error` topic, regardless of the success-path topic above.
     test_client
-        .publish("devices/42/raw", QoS::AtLeastOnce, false, vec![0xffu8, 0xfe])
+        .publish(
+            "devices/42/raw",
+            QoS::AtLeastOnce,
+            false,
+            vec![0xffu8, 0xfe],
+        )
         .await
         .unwrap();
 
@@ -186,7 +195,7 @@ async fn subscribe_decode_republish_end_to_end() {
         .await
         .expect("timed out waiting for error message")
         .expect("channel closed");
-    assert_eq!(topic, "devices/42/raw/error");
+    assert_eq!(topic, "devices/42/raw/decode_error");
     let payload = String::from_utf8(payload).unwrap();
     assert!(payload.starts_with("error: "));
     assert!(payload.contains("raw_hex: fffe"));
@@ -215,7 +224,11 @@ async fn subscribe_decode_republish_end_to_end() {
     assert_eq!(topic, "sensors/temp/decoded");
     assert_eq!(
         String::from_utf8(payload).unwrap(),
-        format!("{} ({} bytes)", hex::encode("sensor-payload"), "sensor-payload".len())
+        format!(
+            "{} ({} bytes)",
+            hex::encode("sensor-payload"),
+            "sensor-payload".len()
+        )
     );
 
     // No further (feedback-loop) message should follow within a short window.

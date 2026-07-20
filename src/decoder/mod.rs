@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use rumqttc::Publish;
 use thiserror::Error;
 
 use crate::topic::TopicFilter;
@@ -12,11 +13,13 @@ pub enum DecodeError {
     Message(String),
 }
 
-/// Decodes a raw MQTT payload into a human-readable string. Implementations should be cheap to
-/// share across messages (registered once, invoked per message).
+/// Decodes an incoming MQTT publish into a human-readable string. Implementations get the whole
+/// [`Publish`] packet (topic, QoS, retain, payload, ...), not just the payload bytes, since some
+/// decoders may need more than the raw payload to decode correctly. Implementations should be
+/// cheap to share across messages (registered once, invoked per message).
 pub trait Decoder: Send + Sync {
     fn name(&self) -> &str;
-    fn decode(&self, payload: &[u8]) -> Result<String, DecodeError>;
+    fn decode(&self, publish: &Publish) -> Result<String, DecodeError>;
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

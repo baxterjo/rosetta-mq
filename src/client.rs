@@ -1,7 +1,6 @@
 use std::time::Duration;
 
-use bytes::Bytes;
-use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+use rumqttc::{AsyncClient, Event, MqttOptions, Packet, Publish, QoS};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -14,17 +13,11 @@ pub enum BrokerError {
     Connection(#[from] rumqttc::ConnectionError),
 }
 
-/// A message received on a subscribed topic.
-pub struct IncomingMessage {
-    pub topic: String,
-    pub payload: Bytes,
-}
-
 /// A live connection to an MQTT broker: a client handle for publishing/subscribing, a channel of
 /// incoming messages, and the background task driving the underlying connection.
 pub struct MqttConnection {
     pub client: AsyncClient,
-    pub incoming: mpsc::Receiver<IncomingMessage>,
+    pub incoming: mpsc::Receiver<Publish>,
     pub driver: JoinHandle<Result<(), BrokerError>>,
 }
 
@@ -47,11 +40,7 @@ impl Client {
             loop {
                 match eventloop.poll().await {
                     Ok(Event::Incoming(Packet::Publish(publish))) => {
-                        let message = IncomingMessage {
-                            topic: publish.topic,
-                            payload: publish.payload,
-                        };
-                        if tx.send(message).await.is_err() {
+                        if tx.send(publish).await.is_err() {
                             break;
                         }
                     }

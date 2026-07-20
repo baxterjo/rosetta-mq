@@ -1,3 +1,5 @@
+use rumqttc::Publish;
+
 use crate::decoder::{DecodeError, Decoder};
 
 /// Interprets the payload as UTF-8 text. Fails on invalid UTF-8, which exercises the
@@ -9,8 +11,8 @@ impl Decoder for Utf8Decoder {
         "utf8"
     }
 
-    fn decode(&self, payload: &[u8]) -> Result<String, DecodeError> {
-        std::str::from_utf8(payload)
+    fn decode(&self, publish: &Publish) -> Result<String, DecodeError> {
+        std::str::from_utf8(&publish.payload)
             .map(|s| s.to_string())
             .map_err(|e| DecodeError::Message(e.to_string()))
     }
@@ -18,15 +20,19 @@ impl Decoder for Utf8Decoder {
 
 #[cfg(test)]
 mod tests {
+    use rumqttc::QoS;
+
     use super::*;
 
     #[test]
     fn utf8_decodes_valid_text() {
-        assert_eq!(Utf8Decoder.decode(b"hello device").unwrap(), "hello device");
+        let publish = Publish::new("devices/42/raw", QoS::AtLeastOnce, b"hello device".to_vec());
+        assert_eq!(Utf8Decoder.decode(&publish).unwrap(), "hello device");
     }
 
     #[test]
     fn utf8_fails_on_invalid_bytes() {
-        assert!(Utf8Decoder.decode(&[0xff, 0xfe]).is_err());
+        let publish = Publish::new("devices/42/raw", QoS::AtLeastOnce, vec![0xff, 0xfe]);
+        assert!(Utf8Decoder.decode(&publish).is_err());
     }
 }

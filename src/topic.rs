@@ -61,8 +61,6 @@ impl TopicFilter {
     }
 
     /// Per-segment specificity vector (literal=2, `+`=1, `#`=0), calculated once at parse time.
-    /// Exposed for inspection; use `Ord`/`PartialOrd` on `TopicFilter` itself (below) to resolve
-    /// "best match wins" between overlapping filters.
     pub fn specificity(&self) -> &[u8] {
         &self.specificity
     }

@@ -1,18 +1,13 @@
-use rumqttc::{AsyncClient, QoS};
+use rumqttc::{AsyncClient, Publish, QoS};
 use tokio::sync::mpsc;
 
-use crate::client::IncomingMessage;
 use crate::decoder::DecoderRegistry;
 
 /// Decode/republish loop: for each incoming message, resolves a decoder for its topic and
 /// publishes either the decoded text to `{topic}/decoded` or an error-annotated payload to
 /// `{topic}/error`. Never drops a message silently, and a failed publish is logged rather than
 /// fatal — one bad publish must not kill the rest of the subscriber loop.
-pub async fn run(
-    mut incoming: mpsc::Receiver<IncomingMessage>,
-    client: AsyncClient,
-    registry: DecoderRegistry,
-) {
+pub async fn run(mut incoming: mpsc::Receiver<Publish>, client: AsyncClient, registry: DecoderRegistry) {
     while let Some(message) = incoming.recv().await {
         // A `#` (or otherwise broad) topic_filter can match our own `.../decoded` and
         // `.../error` output topics, which would otherwise cause the pipeline to decode its own
@@ -26,7 +21,7 @@ pub async fn run(
             continue;
         };
 
-        let (output_topic, payload) = match decoder.decode(&message.payload) {
+        let (output_topic, payload) = match decoder.decode(&message) {
             Ok(decoded) => (format!("{}/decoded", message.topic), decoded),
             Err(err) => (
                 format!("{}/decode_error", message.topic),
