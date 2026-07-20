@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package device.v1;
+
+import "common/status.proto";
+
+message DeviceReading {
+  string device_id = 1;
+  double temperature_c = 2;
+  bool online = 3;
+  common.v1.ConnectionStatus status = 4;
+}

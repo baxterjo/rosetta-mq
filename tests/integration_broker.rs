@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::time::Duration;
 
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
@@ -8,12 +9,18 @@ use tokio::time::timeout;
 
 use rosetta_mq::client::Client;
 use rosetta_mq::config::{BrokerConfig, Config, TopicMapping};
-use rosetta_mq::decoder::builtin;
-use rosetta_mq::decoder::DecoderRegistryBuilder;
+use rosetta_mq::decoder::protobuf::ProtobufConfig;
+use rosetta_mq::decoder::{DecoderConfig, DecoderRegistryBuilder};
 use rosetta_mq::pipeline;
 use rosetta_mq::topic::TopicFilter;
 
 const TEST_PORT: u16 = 18883;
+const PROTOBUF_TEST_PORT: u16 = 18884;
+const PROTO_FIXTURE: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/protobuf/device.proto");
+// `device.proto` imports `common/status.proto`, a sibling of `protobuf/` -- resolving it needs
+// an include path covering both directories, not just device.proto's own parent.
+const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
 fn rumqttd_config(port: u16) -> rumqttd::Config {
     let listen: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -95,18 +102,18 @@ async fn subscribe_decode_republish_end_to_end() {
         topics: vec![
             TopicMapping {
                 topic_filter: "devices/+/raw".to_string(),
-                decoder: "utf8".to_string(),
+                decoder: DecoderConfig::Utf8,
             },
             TopicMapping {
                 topic_filter: "sensors/#".to_string(),
-                decoder: "hexdump".to_string(),
+                decoder: DecoderConfig::Hexdump,
             },
         ],
     };
 
     let mut builder = DecoderRegistryBuilder::new();
     for mapping in &app_config.topics {
-        let decoder = builtin::by_name(&mapping.decoder).unwrap();
+        let decoder = mapping.decoder.build(Path::new(".")).unwrap();
         let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
         builder.register(filter, decoder).unwrap();
     }
@@ -237,4 +244,119 @@ async fn subscribe_decode_republish_end_to_end() {
         third.is_err(),
         "expected no further messages, but got a feedback-loop message: {third:?}"
     );
+}
+
+/// End-to-end coverage for the runtime-schema protobuf decoder: a real broker, a topic mapping
+/// pointing at the fixture `.proto`, and real encoded wire bytes -- proving `.proto` compilation,
+/// dynamic decode, and JSON republish all work together, not just each in isolation.
+#[tokio::test]
+async fn protobuf_decoder_end_to_end() {
+    let broker_config = rumqttd_config(PROTOBUF_TEST_PORT);
+    std::thread::spawn(move || {
+        let mut broker = rumqttd::Broker::new(broker_config);
+        let _ = broker.start();
+    });
+    wait_for_port(PROTOBUF_TEST_PORT).await;
+
+    let app_config = Config {
+        broker: BrokerConfig {
+            host: "127.0.0.1".to_string(),
+            port: PROTOBUF_TEST_PORT,
+            client_id: "rosetta-mq-protobuf-test".to_string(),
+        },
+        topics: vec![TopicMapping {
+            topic_filter: "devices/+/proto".to_string(),
+            decoder: DecoderConfig::Protobuf(ProtobufConfig {
+                proto_file: PROTO_FIXTURE.to_string(),
+                message_type: "device.v1.DeviceReading".to_string(),
+                include_paths: vec![FIXTURES_DIR.to_string()],
+            }),
+        }],
+    };
+
+    let mut builder = DecoderRegistryBuilder::new();
+    for mapping in &app_config.topics {
+        let decoder = mapping.decoder.build(Path::new(".")).unwrap();
+        let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
+        builder.register(filter, decoder).unwrap();
+    }
+    let registry = builder.build();
+
+    let conn = Client::connect(&app_config.broker);
+    Client::subscribe_all(
+        &conn.client,
+        app_config.topics.iter().map(|t| t.topic_filter.as_str()),
+    )
+    .await
+    .unwrap();
+
+    let pipeline_client = conn.client.clone();
+    tokio::spawn(pipeline::run(conn.incoming, pipeline_client, registry));
+
+    let mut options = MqttOptions::new(
+        "test-observer-protobuf",
+        "127.0.0.1",
+        PROTOBUF_TEST_PORT,
+    );
+    options.set_keep_alive(Duration::from_secs(30));
+    let (test_client, mut test_eventloop) = AsyncClient::new(options, 100);
+
+    let (tx, mut rx) = mpsc::channel(10);
+    tokio::spawn(async move {
+        loop {
+            match test_eventloop.poll().await {
+                Ok(Event::Incoming(Packet::Publish(publish))) => {
+                    if tx
+                        .send((publish.topic, publish.payload.to_vec()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    test_client
+        .subscribe("devices/42/proto/decoded", QoS::AtLeastOnce)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Encode a real DeviceReading, independent of the decoder under test -- compiling the same
+    // fixture a second time here mirrors an external producer that encodes according to the
+    // shared schema, rather than reaching into the decoder's private descriptor.
+    let file_descriptor_set = protox::compile([PROTO_FIXTURE], [FIXTURES_DIR]).unwrap();
+    let pool = prost_reflect::DescriptorPool::from_file_descriptor_set(file_descriptor_set).unwrap();
+    let descriptor = pool.get_message_by_name("device.v1.DeviceReading").unwrap();
+    let mut message = prost_reflect::DynamicMessage::new(descriptor);
+    message.set_field_by_name(
+        "device_id",
+        prost_reflect::Value::String("sensor-42".to_string()),
+    );
+    message.set_field_by_name("temperature_c", prost_reflect::Value::F64(21.5));
+    message.set_field_by_name("online", prost_reflect::Value::Bool(true));
+    message.set_field_by_name("status", prost_reflect::Value::EnumNumber(1)); // CONNECTION_STATUS_ONLINE
+    let bytes = prost::Message::encode_to_vec(&message);
+
+    test_client
+        .publish("devices/42/proto", QoS::AtLeastOnce, false, bytes)
+        .await
+        .unwrap();
+
+    let (topic, payload) = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for decoded protobuf message")
+        .expect("channel closed");
+    assert_eq!(topic, "devices/42/proto/decoded");
+
+    let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(json["device_id"], "sensor-42");
+    assert_eq!(json["temperature_c"], 21.5);
+    assert_eq!(json["online"], true);
+    assert_eq!(json["status"], "CONNECTION_STATUS_ONLINE");
 }

@@ -1,5 +1,7 @@
 # rosetta-mq
 
+IF `AGENTS-local.md` EXISTS IN THIS DIRECTORY, READ IT BEFORE READING THIS FILE.
+
 ## What this is
 
 `rosetta-mq` is a standalone CLI tool for developers debugging IoT systems over MQTT.
@@ -51,12 +53,6 @@ These are v1 decisions, not permanent constraints — future work may revisit th
 (e.g. adding heuristic decoding, round-trip encode, or multi-broker support), but
 don't build toward those speculatively unless asked.
 
-## License
-
-Dual-licensed **MIT OR Apache-2.0**, matching Rust ecosystem convention. Any new
-source file should carry the standard dual-license header used by crates like serde
-and tokio.
-
 ## Non-goals
 
 - Not a general-purpose MQTT broker or GUI client — there are good tools for that
@@ -70,6 +66,6 @@ and tokio.
 
 - Prefer small, composable modules — especially around the decoder registry, since
   new codecs will be added frequently.
-- Write integration tests against a local broker (e.g. an embedded or Dockerized
-  Mosquitto) rather than mocking MQTT wire behavior by hand.
+
+
 

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::decoder::DecoderConfig;
 use crate::topic::{TopicError, TopicFilter};
 
 #[derive(Debug, Error)]
@@ -40,7 +41,8 @@ pub struct BrokerConfig {
 #[derive(Debug, Deserialize)]
 pub struct TopicMapping {
     pub topic_filter: String,
-    pub decoder: String,
+    #[serde(flatten)]
+    pub decoder: DecoderConfig,
 }
 
 impl Config {
@@ -89,6 +91,12 @@ mod tests {
         [[topic]]
         topic_filter = "sensors/#"
         decoder = "hexdump"
+
+        [[topic]]
+        topic_filter = "devices/+/proto"
+        decoder = "protobuf"
+        proto_file = "schemas/device.proto"
+        message_type = "device.v1.DeviceReading"
     "#;
 
     #[test]
@@ -97,9 +105,36 @@ mod tests {
         assert_eq!(config.broker.host, "127.0.0.1");
         assert_eq!(config.broker.port, 1883);
         assert_eq!(config.broker.client_id, "rosetta-mq");
-        assert_eq!(config.topics.len(), 2);
+        assert_eq!(config.topics.len(), 3);
         assert_eq!(config.topics[0].topic_filter, "devices/+/raw");
-        assert_eq!(config.topics[0].decoder, "utf8");
+        assert!(matches!(config.topics[0].decoder, DecoderConfig::Utf8));
+        assert!(matches!(config.topics[1].decoder, DecoderConfig::Hexdump));
+        match &config.topics[2].decoder {
+            DecoderConfig::Protobuf(cfg) => {
+                assert_eq!(cfg.proto_file, "schemas/device.proto");
+                assert_eq!(cfg.message_type, "device.v1.DeviceReading");
+                assert!(cfg.include_paths.is_empty());
+            }
+            other => panic!("expected protobuf decoder config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_protobuf_mapping_missing_required_field() {
+        let err = Config::parse(
+            r#"
+            [broker]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+
+            [[topic]]
+            topic_filter = "devices/+/proto"
+            decoder = "protobuf"
+            proto_file = "schemas/device.proto"
+        "#,
+        );
+        assert!(matches!(err, Err(ConfigError::Parse(_))));
     }
 
     #[test]

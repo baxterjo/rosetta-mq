@@ -1,11 +1,14 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use rumqttc::Publish;
+use serde::Deserialize;
 use thiserror::Error;
 
 use crate::topic::TopicFilter;
 
 pub mod builtin;
+pub mod protobuf;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DecodeError {
@@ -20,6 +23,44 @@ pub enum DecodeError {
 pub trait Decoder: Send + Sync {
     fn name(&self) -> &str;
     fn decode(&self, publish: &Publish) -> Result<String, DecodeError>;
+}
+
+/// Per-topic decoder configuration, discriminated by the `decoder` field in TOML (e.g.
+/// `decoder = "protobuf"`, plus that variant's own fields as siblings at the same level -- see
+/// [`protobuf::ProtobufConfig`]). Lives here rather than in `config.rs` because it's
+/// decoder-specific domain knowledge, the same way `config.rs` already depends on
+/// [`crate::topic::TopicFilter`] rather than redefining topic-filter parsing itself.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "decoder")]
+pub enum DecoderConfig {
+    #[serde(rename = "hexdump")]
+    Hexdump,
+    #[serde(rename = "utf8")]
+    Utf8,
+    #[serde(rename = "protobuf")]
+    Protobuf(protobuf::ProtobufConfig),
+}
+
+impl DecoderConfig {
+    /// Constructs the decoder this config describes. Fallible and I/O-bound for schema-based
+    /// decoders (e.g. compiling a `.proto` file), so this runs once at registry-build time, not
+    /// per message. `base_dir` resolves any relative paths in decoder-specific config (e.g.
+    /// `proto_file`) against the config file's directory rather than the process's CWD.
+    pub fn build(&self, base_dir: &Path) -> Result<Arc<dyn Decoder>, BuildDecoderError> {
+        match self {
+            DecoderConfig::Hexdump => Ok(Arc::new(builtin::HexDumpDecoder)),
+            DecoderConfig::Utf8 => Ok(Arc::new(builtin::Utf8Decoder)),
+            DecoderConfig::Protobuf(cfg) => Ok(Arc::new(protobuf::ProtobufDecoder::from_config(
+                cfg, base_dir,
+            )?)),
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum BuildDecoderError {
+    #[error(transparent)]
+    Protobuf(#[from] protobuf::ProtobufDecoderError),
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
