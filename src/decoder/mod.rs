@@ -49,7 +49,11 @@ impl DecoderRegistryBuilder {
         filter: TopicFilter,
         decoder: Arc<dyn Decoder>,
     ) -> Result<(), RegistryError> {
-        if self.entries.iter().any(|e| e.filter.as_str() == filter.as_str()) {
+        if self
+            .entries
+            .iter()
+            .any(|e| e.filter.as_str() == filter.as_str())
+        {
             return Err(RegistryError::DuplicateFilter(filter.as_str().to_string()));
         }
         self.entries.push(RegistryEntry { filter, decoder });
@@ -71,20 +75,11 @@ pub struct DecoderRegistry {
 
 impl DecoderRegistry {
     pub fn resolve(&self, topic: &str) -> Option<&dyn Decoder> {
-        let mut best: Option<&RegistryEntry> = None;
-        for entry in &self.entries {
-            if !entry.filter.matches(topic) {
-                continue;
-            }
-            let is_better = match best {
-                None => true,
-                Some(current) => entry.filter > current.filter,
-            };
-            if is_better {
-                best = Some(entry);
-            }
-        }
-        best.map(|entry| entry.decoder.as_ref())
+        self.entries
+            .iter()
+            .filter(|e| e.filter.matches(topic))
+            .max_by_key(|e| &e.filter)
+            .map(|e| e.decoder.as_ref())
     }
 }
 
@@ -97,7 +92,10 @@ mod tests {
     fn resolves_most_specific_match() {
         let mut builder = DecoderRegistryBuilder::new();
         builder
-            .register(TopicFilter::parse("devices/+/raw").unwrap(), Arc::new(Utf8Decoder))
+            .register(
+                TopicFilter::parse("devices/+/raw").unwrap(),
+                Arc::new(Utf8Decoder),
+            )
             .unwrap();
         builder
             .register(
@@ -107,7 +105,10 @@ mod tests {
             .unwrap();
         let registry = builder.build();
 
-        assert_eq!(registry.resolve("devices/42/raw").unwrap().name(), "hexdump");
+        assert_eq!(
+            registry.resolve("devices/42/raw").unwrap().name(),
+            "hexdump"
+        );
         assert_eq!(registry.resolve("devices/99/raw").unwrap().name(), "utf8");
     }
 
@@ -115,7 +116,10 @@ mod tests {
     fn resolve_returns_none_when_no_filter_matches() {
         let mut builder = DecoderRegistryBuilder::new();
         builder
-            .register(TopicFilter::parse("devices/+/raw").unwrap(), Arc::new(Utf8Decoder))
+            .register(
+                TopicFilter::parse("devices/+/raw").unwrap(),
+                Arc::new(Utf8Decoder),
+            )
             .unwrap();
         let registry = builder.build();
 
@@ -126,7 +130,10 @@ mod tests {
     fn register_rejects_duplicate_filter_strings() {
         let mut builder = DecoderRegistryBuilder::new();
         builder
-            .register(TopicFilter::parse("devices/+/raw").unwrap(), Arc::new(Utf8Decoder))
+            .register(
+                TopicFilter::parse("devices/+/raw").unwrap(),
+                Arc::new(Utf8Decoder),
+            )
             .unwrap();
 
         let err = builder.register(
