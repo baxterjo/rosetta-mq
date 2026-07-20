@@ -1,10 +1,9 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::Parser;
 use rosetta_mq::client::Client;
 use rosetta_mq::config::Config;
-use rosetta_mq::decoder::builtin;
 use rosetta_mq::decoder::DecoderRegistryBuilder;
 use rosetta_mq::pipeline;
 use rosetta_mq::topic::TopicFilter;
@@ -29,12 +28,18 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load(&cli.config)
         .with_context(|| format!("loading config from {}", cli.config.display()))?;
 
+    let base_dir = cli
+        .config
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+
     let mut builder = DecoderRegistryBuilder::new();
     for mapping in &config.topics {
-        let decoder = builtin::by_name(&mapping.decoder).with_context(|| {
+        let decoder = mapping.decoder.build(&base_dir).with_context(|| {
             format!(
-                "unknown decoder {:?} for topic_filter {:?}",
-                mapping.decoder, mapping.topic_filter
+                "building decoder for topic_filter {:?}",
+                mapping.topic_filter
             )
         })?;
         let filter = TopicFilter::parse(&mapping.topic_filter)

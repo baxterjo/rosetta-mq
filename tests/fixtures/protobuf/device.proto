@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package device.v1;
+
+message DeviceReading {
+  string device_id = 1;
+  double temperature_c = 2;
+  bool online = 3;
+}
