@@ -14,9 +14,22 @@ fn relative_proto_file_resolves_against_config_directory_not_process_cwd() {
     ));
     std::fs::create_dir_all(&test_dir).unwrap();
 
-    let proto_src =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/protobuf/device.proto");
-    std::fs::copy(&proto_src, test_dir.join("device.proto")).unwrap();
+    let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    std::fs::copy(
+        fixtures_dir.join("protobuf/device.proto"),
+        test_dir.join("device.proto"),
+    )
+    .unwrap();
+
+    // `device.proto` imports `common/status.proto`; mirror that relative layout under `test_dir`
+    // so the decoder's *default* include path (device.proto's own directory) still covers it --
+    // this test is about `proto_file` resolution, not `include_paths`, so keep that unrelated.
+    std::fs::create_dir_all(test_dir.join("common")).unwrap();
+    std::fs::copy(
+        fixtures_dir.join("common/status.proto"),
+        test_dir.join("common/status.proto"),
+    )
+    .unwrap();
 
     let config_path = test_dir.join("rosetta-mq.toml");
     std::fs::write(

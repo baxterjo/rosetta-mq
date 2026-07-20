@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package common.v1;
+
+enum ConnectionStatus {
+  CONNECTION_STATUS_UNSPECIFIED = 0;
+  CONNECTION_STATUS_ONLINE = 1;
+  CONNECTION_STATUS_OFFLINE = 2;
+}

@@ -16,3 +16,6 @@ topic_filter = "sensors/proto/#"
 decoder = "protobuf"
 proto_file = "../protobuf/device.proto"
 message_type = "device.v1.DeviceReading"
+# device.proto imports common/status.proto, a sibling of protobuf/ -- needs an include path
+# covering both directories, not just device.proto's own parent.
+include_paths = [".."]

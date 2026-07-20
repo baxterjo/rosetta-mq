@@ -53,14 +53,13 @@ impl ProtobufDecoder {
     ) -> Result<Self, ProtobufDecoderError> {
         let proto_file = resolve(base_dir, &cfg.proto_file);
 
-        let include_paths: Vec<PathBuf> = if cfg.include_paths.is_empty() {
-            vec![proto_file.parent().unwrap_or(base_dir).to_path_buf()]
-        } else {
-            cfg.include_paths
-                .iter()
-                .map(|p| resolve(base_dir, p))
-                .collect()
-        };
+        // `proto_file`'s own directory is always searchable (protox requires the root file to
+        // reside under one of the given include paths, same as `protoc`) -- `include_paths` are
+        // *extra* paths on top of that, for resolving `import`s that live elsewhere, not a
+        // replacement for it.
+        let mut include_paths: Vec<PathBuf> =
+            vec![proto_file.parent().unwrap_or(base_dir).to_path_buf()];
+        include_paths.extend(cfg.include_paths.iter().map(|p| resolve(base_dir, p)));
 
         let file_descriptor_set =
             protox::compile([&proto_file], &include_paths).map_err(|source| {
@@ -133,12 +132,16 @@ mod tests {
 
     const FIXTURE: &str =
         concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/protobuf/device.proto");
+    // `device.proto` imports `common/status.proto`, which lives in a sibling directory
+    // (`tests/fixtures/common/`), not under `device.proto`'s own directory -- so resolving it
+    // requires an explicit include path covering both, not just the default single-directory one.
+    const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
     fn test_config() -> ProtobufConfig {
         ProtobufConfig {
             proto_file: FIXTURE.to_string(),
             message_type: "device.v1.DeviceReading".to_string(),
-            include_paths: Vec::new(),
+            include_paths: vec![FIXTURES_DIR.to_string()],
         }
     }
 
@@ -150,6 +153,10 @@ mod tests {
         message.set_field_by_name("device_id", Value::String("sensor-42".to_string()));
         message.set_field_by_name("temperature_c", Value::F64(21.5));
         message.set_field_by_name("online", Value::Bool(true));
+        message.set_field_by_name(
+            "status",
+            Value::EnumNumber(1), // CONNECTION_STATUS_ONLINE
+        );
         let bytes = message.encode_to_vec();
 
         let publish = Publish::new("devices/42/raw", QoS::AtLeastOnce, bytes);
@@ -159,6 +166,7 @@ mod tests {
         assert_eq!(value["device_id"], "sensor-42");
         assert_eq!(value["temperature_c"], 21.5);
         assert_eq!(value["online"], true);
+        assert_eq!(value["status"], "CONNECTION_STATUS_ONLINE");
     }
 
     #[test]
@@ -170,10 +178,28 @@ mod tests {
         let cfg = ProtobufConfig {
             proto_file: "device.proto".to_string(),
             message_type: "device.v1.DeviceReading".to_string(),
-            include_paths: Vec::new(),
+            // Relative to `base_dir` (tests/fixtures/protobuf/), so this resolves to
+            // tests/fixtures/ -- the import "common/status.proto" is joined against this,
+            // landing on tests/fixtures/common/status.proto, where it actually lives.
+            include_paths: vec!["..".to_string()],
         };
 
         ProtobufDecoder::from_config(&cfg, &base_dir).unwrap();
+    }
+
+    #[test]
+    fn fails_to_compile_without_include_paths_for_import() {
+        // Without an explicit `include_paths`, the default (device.proto's own parent
+        // directory) doesn't cover the sibling `tests/fixtures/common/status.proto` it imports,
+        // so compilation must fail -- proving `include_paths` is actually load-bearing here, not
+        // just accepted-and-ignored.
+        let cfg = ProtobufConfig {
+            proto_file: FIXTURE.to_string(),
+            message_type: "device.v1.DeviceReading".to_string(),
+            include_paths: Vec::new(),
+        };
+        let err = ProtobufDecoder::from_config(&cfg, Path::new(".")).unwrap_err();
+        assert!(matches!(err, ProtobufDecoderError::Compile { .. }));
     }
 
     #[test]

@@ -18,6 +18,9 @@ const TEST_PORT: u16 = 18883;
 const PROTOBUF_TEST_PORT: u16 = 18884;
 const PROTO_FIXTURE: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/protobuf/device.proto");
+// `device.proto` imports `common/status.proto`, a sibling of `protobuf/` -- resolving it needs
+// an include path covering both directories, not just device.proto's own parent.
+const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
 fn rumqttd_config(port: u16) -> rumqttd::Config {
     let listen: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -266,7 +269,7 @@ async fn protobuf_decoder_end_to_end() {
             decoder: DecoderConfig::Protobuf(ProtobufConfig {
                 proto_file: PROTO_FIXTURE.to_string(),
                 message_type: "device.v1.DeviceReading".to_string(),
-                include_paths: Vec::new(),
+                include_paths: vec![FIXTURES_DIR.to_string()],
             }),
         }],
     };
@@ -327,8 +330,7 @@ async fn protobuf_decoder_end_to_end() {
     // Encode a real DeviceReading, independent of the decoder under test -- compiling the same
     // fixture a second time here mirrors an external producer that encodes according to the
     // shared schema, rather than reaching into the decoder's private descriptor.
-    let file_descriptor_set =
-        protox::compile([PROTO_FIXTURE], [Path::new(PROTO_FIXTURE).parent().unwrap()]).unwrap();
+    let file_descriptor_set = protox::compile([PROTO_FIXTURE], [FIXTURES_DIR]).unwrap();
     let pool = prost_reflect::DescriptorPool::from_file_descriptor_set(file_descriptor_set).unwrap();
     let descriptor = pool.get_message_by_name("device.v1.DeviceReading").unwrap();
     let mut message = prost_reflect::DynamicMessage::new(descriptor);
@@ -338,6 +340,7 @@ async fn protobuf_decoder_end_to_end() {
     );
     message.set_field_by_name("temperature_c", prost_reflect::Value::F64(21.5));
     message.set_field_by_name("online", prost_reflect::Value::Bool(true));
+    message.set_field_by_name("status", prost_reflect::Value::EnumNumber(1)); // CONNECTION_STATUS_ONLINE
     let bytes = prost::Message::encode_to_vec(&message);
 
     test_client
@@ -355,4 +358,5 @@ async fn protobuf_decoder_end_to_end() {
     assert_eq!(json["device_id"], "sensor-42");
     assert_eq!(json["temperature_c"], 21.5);
     assert_eq!(json["online"], true);
+    assert_eq!(json["status"], "CONNECTION_STATUS_ONLINE");
 }
