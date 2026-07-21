@@ -7,6 +7,7 @@ use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
+use rosetta_mq::auth::ResolvedAuth;
 use rosetta_mq::client::Client;
 use rosetta_mq::config::{BrokerConfig, Config, TopicMapping};
 use rosetta_mq::decoder::protobuf::ProtobufConfig;
@@ -98,6 +99,7 @@ async fn subscribe_decode_republish_end_to_end() {
             host: "127.0.0.1".to_string(),
             port: TEST_PORT,
             client_id: "rosetta-mq-test".to_string(),
+            auth: None,
         },
         topics: vec![
             TopicMapping {
@@ -119,7 +121,7 @@ async fn subscribe_decode_republish_end_to_end() {
     }
     let registry = builder.build();
 
-    let conn = Client::connect(&app_config.broker);
+    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None);
     Client::subscribe_all(
         &conn.client,
         app_config.topics.iter().map(|t| t.topic_filter.as_str()),
@@ -263,6 +265,7 @@ async fn protobuf_decoder_end_to_end() {
             host: "127.0.0.1".to_string(),
             port: PROTOBUF_TEST_PORT,
             client_id: "rosetta-mq-protobuf-test".to_string(),
+            auth: None,
         },
         topics: vec![TopicMapping {
             topic_filter: "devices/+/proto".to_string(),
@@ -282,7 +285,7 @@ async fn protobuf_decoder_end_to_end() {
     }
     let registry = builder.build();
 
-    let conn = Client::connect(&app_config.broker);
+    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None);
     Client::subscribe_all(
         &conn.client,
         app_config.topics.iter().map(|t| t.topic_filter.as_str()),
