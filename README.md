@@ -59,6 +59,32 @@ include_paths = ["schemas/common"]
 | `host`      | Broker hostname or IP address.                |
 | `port`      | Broker port (e.g. `1883`).                    |
 | `client_id` | MQTT client ID used for this connection.      |
+| `auth`      | Optional `[broker.auth]` table (see below). Omit entirely for an unauthenticated connection. |
+
+### `[broker.auth]`
+
+Two mutually exclusive auth methods, picked by `method`. Only one may be
+configured per broker.
+
+```toml
+[broker.auth]
+method = "mtls"
+ca_file = "certs/ca.pem"
+cert_file = "certs/client.pem"
+key_file = "certs/client.key"
+```
+
+```toml
+[broker.auth]
+method = "userpass"
+username = "device-reader"
+password = { env = "MQTT_PASSWORD" } # or a literal string: password = "supersecret"
+```
+
+| `method`    | Fields                                    | Description                                                        |
+|-------------|--------------------------------------------|---------------------------------------------------------------------|
+| `"mtls"`    | `ca_file`, `cert_file`, `key_file`         | Mutual TLS: CA cert, client cert, and client private key (PEM), each resolved relative to the config file's directory. |
+| `"userpass"`| `username`, `password`                    | Username/password auth. `password` is either a literal string, or `{ env = "VAR_NAME" }` to read it from an environment variable instead of storing it in the config file. |
 
 ### `[[topic]]`
 

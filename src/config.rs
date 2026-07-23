@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::auth::AuthConfig;
 use crate::decoder::DecoderConfig;
 use crate::topic::{TopicError, TopicFilter};
 
@@ -36,6 +37,7 @@ pub struct BrokerConfig {
     pub host: String,
     pub port: u16,
     pub client_id: String,
+    pub auth: Option<AuthConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,6 +140,68 @@ mod tests {
     }
 
     #[test]
+    fn defaults_to_none_when_broker_auth_omitted() {
+        let config = Config::parse(VALID).unwrap();
+        assert!(config.broker.auth.is_none());
+    }
+
+    #[test]
+    fn parses_broker_mtls_auth() {
+        let config = Config::parse(
+            r#"
+            [broker]
+            host = "127.0.0.1"
+            port = 8883
+            client_id = "x"
+
+            [broker.auth]
+            method = "mtls"
+            ca_file = "ca.pem"
+            cert_file = "client.pem"
+            key_file = "client.key"
+        "#,
+        )
+        .unwrap();
+
+        match config.broker.auth {
+            Some(AuthConfig::Mtls(cfg)) => {
+                assert_eq!(cfg.ca_file, Path::new("ca.pem"));
+                assert_eq!(cfg.cert_file, Path::new("client.pem"));
+                assert_eq!(cfg.key_file, Path::new("client.key"));
+            }
+            other => panic!("expected mtls auth config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_broker_userpass_auth() {
+        let config = Config::parse(
+            r#"
+            [broker]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+
+            [broker.auth]
+            method = "userpass"
+            username = "device-reader"
+            password = { env = "MQTT_PASSWORD" }
+        "#,
+        )
+        .unwrap();
+
+        match config.broker.auth {
+            Some(AuthConfig::UserPass(cfg)) => {
+                assert_eq!(cfg.username, "device-reader");
+                assert!(
+                    matches!(cfg.password, crate::auth::PasswordSource::Env { env } if env == "MQTT_PASSWORD")
+                );
+            }
+            other => panic!("expected userpass auth config, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn defaults_to_empty_topics_when_omitted() {
         let config = Config::parse(
             r#"
@@ -170,6 +234,9 @@ mod tests {
 
     #[test]
     fn rejects_malformed_toml() {
-        assert!(matches!(Config::parse("not valid toml === "), Err(ConfigError::Parse(_))));
+        assert!(matches!(
+            Config::parse("not valid toml === "),
+            Err(ConfigError::Parse(_))
+        ));
     }
 }

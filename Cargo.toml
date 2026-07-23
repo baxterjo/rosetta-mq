@@ -34,5 +34,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 anyhow = { version = "1", optional = true }
 
 [dev-dependencies]
-rumqttd = "0.19"
+rumqttd = { version = "0.19", features = ["verify-client-cert"] }
 prost = "0.14"
+tempdir = "0.3.7"
+rcgen = "0.14.8"
+time = "0.3.54"

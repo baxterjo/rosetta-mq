@@ -7,6 +7,7 @@ use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
+use rosetta_mq::auth::ResolvedAuth;
 use rosetta_mq::client::Client;
 use rosetta_mq::config::{BrokerConfig, Config, TopicMapping};
 use rosetta_mq::decoder::protobuf::ProtobufConfig;
@@ -16,8 +17,10 @@ use rosetta_mq::topic::TopicFilter;
 
 const TEST_PORT: u16 = 18883;
 const PROTOBUF_TEST_PORT: u16 = 18884;
-const PROTO_FIXTURE: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/protobuf/device.proto");
+const PROTO_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/protobuf/device.proto"
+);
 // `device.proto` imports `common/status.proto`, a sibling of `protobuf/` -- resolving it needs
 // an include path covering both directories, not just device.proto's own parent.
 const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
@@ -98,6 +101,7 @@ async fn subscribe_decode_republish_end_to_end() {
             host: "127.0.0.1".to_string(),
             port: TEST_PORT,
             client_id: "rosetta-mq-test".to_string(),
+            auth: None,
         },
         topics: vec![
             TopicMapping {
@@ -119,7 +123,7 @@ async fn subscribe_decode_republish_end_to_end() {
     }
     let registry = builder.build();
 
-    let conn = Client::connect(&app_config.broker);
+    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None);
     Client::subscribe_all(
         &conn.client,
         app_config.topics.iter().map(|t| t.topic_filter.as_str()),
@@ -263,6 +267,7 @@ async fn protobuf_decoder_end_to_end() {
             host: "127.0.0.1".to_string(),
             port: PROTOBUF_TEST_PORT,
             client_id: "rosetta-mq-protobuf-test".to_string(),
+            auth: None,
         },
         topics: vec![TopicMapping {
             topic_filter: "devices/+/proto".to_string(),
@@ -282,7 +287,7 @@ async fn protobuf_decoder_end_to_end() {
     }
     let registry = builder.build();
 
-    let conn = Client::connect(&app_config.broker);
+    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None);
     Client::subscribe_all(
         &conn.client,
         app_config.topics.iter().map(|t| t.topic_filter.as_str()),
@@ -293,11 +298,7 @@ async fn protobuf_decoder_end_to_end() {
     let pipeline_client = conn.client.clone();
     tokio::spawn(pipeline::run(conn.incoming, pipeline_client, registry));
 
-    let mut options = MqttOptions::new(
-        "test-observer-protobuf",
-        "127.0.0.1",
-        PROTOBUF_TEST_PORT,
-    );
+    let mut options = MqttOptions::new("test-observer-protobuf", "127.0.0.1", PROTOBUF_TEST_PORT);
     options.set_keep_alive(Duration::from_secs(30));
     let (test_client, mut test_eventloop) = AsyncClient::new(options, 100);
 
@@ -331,7 +332,8 @@ async fn protobuf_decoder_end_to_end() {
     // fixture a second time here mirrors an external producer that encodes according to the
     // shared schema, rather than reaching into the decoder's private descriptor.
     let file_descriptor_set = protox::compile([PROTO_FIXTURE], [FIXTURES_DIR]).unwrap();
-    let pool = prost_reflect::DescriptorPool::from_file_descriptor_set(file_descriptor_set).unwrap();
+    let pool =
+        prost_reflect::DescriptorPool::from_file_descriptor_set(file_descriptor_set).unwrap();
     let descriptor = pool.get_message_by_name("device.v1.DeviceReading").unwrap();
     let mut message = prost_reflect::DynamicMessage::new(descriptor);
     message.set_field_by_name(

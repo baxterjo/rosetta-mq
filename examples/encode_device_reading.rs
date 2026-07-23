@@ -10,8 +10,10 @@ use std::io::Write;
 use prost::Message as _;
 use prost_reflect::{DescriptorPool, DynamicMessage, Value};
 
-const PROTO_FILE: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/protobuf/device.proto");
+const PROTO_FILE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/protobuf/device.proto"
+);
 // `device.proto` imports `common/status.proto`, a sibling of `protobuf/` -- the include path
 // needs to cover both directories, not just device.proto's own parent.
 const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
