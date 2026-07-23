@@ -18,9 +18,9 @@ pub enum AuthConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct MtlsConfig {
-    pub ca_file: String,
-    pub cert_file: String,
-    pub key_file: String,
+    pub ca_file: PathBuf,
+    pub cert_file: PathBuf,
+    pub key_file: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,7 +102,7 @@ impl AuthConfig {
     }
 }
 
-fn read(base_dir: &Path, file: &str) -> Result<Vec<u8>, AuthError> {
+fn read(base_dir: &Path, file: &Path) -> Result<Vec<u8>, AuthError> {
     let path = crate::util::resolve_path(base_dir, file);
     std::fs::read(&path).map_err(|source| AuthError::Io { path, source })
 }
@@ -127,9 +127,9 @@ mod tests {
         );
         match cfg {
             AuthConfig::Mtls(cfg) => {
-                assert_eq!(cfg.ca_file, "ca.pem");
-                assert_eq!(cfg.cert_file, "client.pem");
-                assert_eq!(cfg.key_file, "client.key");
+                assert_eq!(cfg.ca_file, Path::new("ca.pem"));
+                assert_eq!(cfg.cert_file, Path::new("client.pem"));
+                assert_eq!(cfg.key_file, Path::new("client.key"));
             }
             other => panic!("expected mtls config, got {other:?}"),
         }
@@ -202,9 +202,9 @@ mod tests {
         std::fs::write(dir.join("client.key"), b"key-bytes").unwrap();
 
         let cfg = AuthConfig::Mtls(MtlsConfig {
-            ca_file: "ca.pem".to_string(),
-            cert_file: "client.pem".to_string(),
-            key_file: "client.key".to_string(),
+            ca_file: PathBuf::from("ca.pem"),
+            cert_file: PathBuf::from("client.pem"),
+            key_file: PathBuf::from("client.key"),
         });
 
         let resolved = cfg.build(&dir).unwrap();
@@ -222,9 +222,9 @@ mod tests {
     fn build_mtls_fails_on_missing_file() {
         let dir = tempdir();
         let cfg = AuthConfig::Mtls(MtlsConfig {
-            ca_file: "does-not-exist.pem".to_string(),
-            cert_file: "client.pem".to_string(),
-            key_file: "client.key".to_string(),
+            ca_file: PathBuf::from("does-not-exist.pem"),
+            cert_file: PathBuf::from("client.pem"),
+            key_file: PathBuf::from("client.key"),
         });
 
         let err = cfg.build(&dir).unwrap_err();

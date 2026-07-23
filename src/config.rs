@@ -168,9 +168,9 @@ mod tests {
 
         match config.broker.auth {
             Some(AuthConfig::Mtls(cfg)) => {
-                assert_eq!(cfg.ca_file, "ca.pem");
-                assert_eq!(cfg.cert_file, "client.pem");
-                assert_eq!(cfg.key_file, "client.key");
+                assert_eq!(cfg.ca_file, Path::new("ca.pem"));
+                assert_eq!(cfg.cert_file, Path::new("client.pem"));
+                assert_eq!(cfg.key_file, Path::new("client.key"));
             }
             other => panic!("expected mtls auth config, got {other:?}"),
         }
