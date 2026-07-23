@@ -36,3 +36,4 @@ anyhow = { version = "1", optional = true }
 [dev-dependencies]
 rumqttd = "0.19"
 prost = "0.14"
+tempdir = "0.3.7"

@@ -109,6 +109,8 @@ fn read(base_dir: &Path, file: &Path) -> Result<Vec<u8>, AuthError> {
 
 #[cfg(test)]
 mod tests {
+    use tempdir::TempDir;
+
     use super::*;
 
     fn parse(raw: &str) -> AuthConfig {
@@ -196,10 +198,10 @@ mod tests {
 
     #[test]
     fn build_mtls_reads_cert_bytes_relative_to_base_dir() {
-        let dir = tempdir();
-        std::fs::write(dir.join("ca.pem"), b"ca-bytes").unwrap();
-        std::fs::write(dir.join("client.pem"), b"cert-bytes").unwrap();
-        std::fs::write(dir.join("client.key"), b"key-bytes").unwrap();
+        let dir = TempDir::new("rosetta-mq-auth-test").unwrap();
+        std::fs::write(dir.path().join("ca.pem"), b"ca-bytes").unwrap();
+        std::fs::write(dir.path().join("client.pem"), b"cert-bytes").unwrap();
+        std::fs::write(dir.path().join("client.key"), b"key-bytes").unwrap();
 
         let cfg = AuthConfig::Mtls(MtlsConfig {
             ca_file: PathBuf::from("ca.pem"),
@@ -207,7 +209,7 @@ mod tests {
             key_file: PathBuf::from("client.key"),
         });
 
-        let resolved = cfg.build(&dir).unwrap();
+        let resolved = cfg.build(dir.path()).unwrap();
         assert_eq!(
             resolved,
             ResolvedAuth::Mtls {
@@ -220,14 +222,14 @@ mod tests {
 
     #[test]
     fn build_mtls_fails_on_missing_file() {
-        let dir = tempdir();
+        let dir = TempDir::new("rosetta-mq-auth-test").unwrap();
         let cfg = AuthConfig::Mtls(MtlsConfig {
             ca_file: PathBuf::from("does-not-exist.pem"),
             cert_file: PathBuf::from("client.pem"),
             key_file: PathBuf::from("client.key"),
         });
 
-        let err = cfg.build(&dir).unwrap_err();
+        let err = cfg.build(dir.path()).unwrap_err();
         assert!(matches!(err, AuthError::Io { .. }));
     }
 
@@ -298,18 +300,5 @@ mod tests {
 
         let err = cfg.build(Path::new(".")).unwrap_err();
         assert!(matches!(err, AuthError::EnvVar { .. }));
-    }
-
-    fn tempdir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "rosetta-mq-auth-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
     }
 }
