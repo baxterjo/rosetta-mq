@@ -13,6 +13,10 @@ broker:
 run:
     cargo run --bin rosetta-mq -- --config {{justfile_directory()}}/tests/fixtures/config/rosetta-mq.toml --log-level debug
 
+# Run tests using cargo-nextest
+test:
+  cargo nextest run
+
 # Watch every message on the broker -- raw input alongside its decoded/decode_error output.
 watch:
     mosquitto_sub -h 127.0.0.1 -v -t '#'
