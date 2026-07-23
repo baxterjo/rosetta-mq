@@ -66,6 +66,7 @@ don't build toward those speculatively unless asked.
 
 - Prefer small, composable modules — especially around the decoder registry, since
   new codecs will be added frequently.
+- Code comments and doc comments should never reference the past state of the codebase. They are only to document the current state.
 
 
 
