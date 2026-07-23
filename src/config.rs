@@ -37,9 +37,6 @@ pub struct BrokerConfig {
     pub host: String,
     pub port: u16,
     pub client_id: String,
-    /// Absent when the broker requires no authentication -- serde defaults a missing
-    /// `Option<T>` field to `None`, so existing configs without a `[broker.auth]` table keep
-    /// parsing unchanged.
     pub auth: Option<AuthConfig>,
 }
 
@@ -237,6 +234,9 @@ mod tests {
 
     #[test]
     fn rejects_malformed_toml() {
-        assert!(matches!(Config::parse("not valid toml === "), Err(ConfigError::Parse(_))));
+        assert!(matches!(
+            Config::parse("not valid toml === "),
+            Err(ConfigError::Parse(_))
+        ));
     }
 }

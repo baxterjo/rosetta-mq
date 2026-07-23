@@ -7,7 +7,11 @@ use crate::decoder::DecoderRegistry;
 /// publishes either the decoded text to `{topic}/decoded` or an error-annotated payload to
 /// `{topic}/error`. Never drops a message silently, and a failed publish is logged rather than
 /// fatal — one bad publish must not kill the rest of the subscriber loop.
-pub async fn run(mut incoming: mpsc::Receiver<Publish>, client: AsyncClient, registry: DecoderRegistry) {
+pub async fn run(
+    mut incoming: mpsc::Receiver<Publish>,
+    client: AsyncClient,
+    registry: DecoderRegistry,
+) {
     while let Some(message) = incoming.recv().await {
         // A `#` (or otherwise broad) topic_filter can match our own `.../decoded` and
         // `.../error` output topics, which would otherwise cause the pipeline to decode its own

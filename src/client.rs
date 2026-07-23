@@ -1,8 +1,6 @@
 use std::time::Duration;
 
-use rumqttc::{
-    AsyncClient, Event, MqttOptions, Packet, Publish, QoS, TlsConfiguration, Transport,
-};
+use rumqttc::{AsyncClient, Event, MqttOptions, Packet, Publish, QoS, TlsConfiguration, Transport};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -144,9 +142,7 @@ mod tests {
         assert!(options.credentials().is_none());
         match options.transport() {
             Transport::Tls(TlsConfiguration::Simple {
-                ca,
-                client_auth,
-                ..
+                ca, client_auth, ..
             }) => {
                 assert_eq!(ca, b"ca-bytes");
                 assert_eq!(

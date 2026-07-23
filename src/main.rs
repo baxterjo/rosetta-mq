@@ -51,9 +51,7 @@ async fn main() -> anyhow::Result<()> {
     let registry = builder.build();
 
     let auth = match &config.broker.auth {
-        Some(auth_cfg) => auth_cfg
-            .build(&base_dir)
-            .context("resolving broker auth")?,
+        Some(auth_cfg) => auth_cfg.build(&base_dir).context("resolving broker auth")?,
         None => rosetta_mq::auth::ResolvedAuth::None,
     };
 

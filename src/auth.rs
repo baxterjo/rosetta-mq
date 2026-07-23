@@ -36,9 +36,7 @@ pub struct UserPassConfig {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum PasswordSource {
-    Env {
-        env: String,
-    },
+    Env { env: String },
     Literal(String),
 }
 

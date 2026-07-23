@@ -122,8 +122,10 @@ mod tests {
 
     use super::*;
 
-    const FIXTURE: &str =
-        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/protobuf/device.proto");
+    const FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/protobuf/device.proto"
+    );
     // `device.proto` imports `common/status.proto`, which lives in a sibling directory
     // (`tests/fixtures/common/`), not under `device.proto`'s own directory -- so resolving it
     // requires an explicit include path covering both, not just the default single-directory one.

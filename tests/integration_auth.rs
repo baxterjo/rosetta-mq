@@ -104,7 +104,9 @@ async fn assert_connection_round_trips(conn: &rosetta_mq::client::MqttConnection
 async fn mtls_auth_connects_and_round_trips() {
     let tls = rumqttd::TlsConfig::Rustls {
         capath: Some(tls_fixture("ca.pem").to_string_lossy().into_owned()),
-        certpath: tls_fixture("server-cert.pem").to_string_lossy().into_owned(),
+        certpath: tls_fixture("server-cert.pem")
+            .to_string_lossy()
+            .into_owned(),
         keypath: tls_fixture("server-key.pem").to_string_lossy().into_owned(),
     };
     let broker_config = rumqttd_config(MTLS_TEST_PORT, Some(tls), None);

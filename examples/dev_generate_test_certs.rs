@@ -71,7 +71,9 @@ fn new_leaf(
 ) -> (Certificate, KeyPair) {
     let mut params = CertificateParams::new(vec![san.into()]).expect("valid SAN");
     let (yesterday, tomorrow) = validity_period();
-    params.distinguished_name.push(DnType::CommonName, common_name);
+    params
+        .distinguished_name
+        .push(DnType::CommonName, common_name);
     params.use_authority_key_identifier_extension = true;
     params.key_usages.push(KeyUsagePurpose::DigitalSignature);
     params.extended_key_usages.push(eku);
@@ -87,7 +89,9 @@ fn validity_period() -> (OffsetDateTime, OffsetDateTime) {
     // Ten years -- these are committed fixtures, not rotated certs, so they should outlive
     // however long this repo goes between regenerations.
     let span = Duration::new(10 * 365 * 86400, 0);
-    let yesterday = OffsetDateTime::now_utc().checked_sub(Duration::new(86400, 0)).unwrap();
+    let yesterday = OffsetDateTime::now_utc()
+        .checked_sub(Duration::new(86400, 0))
+        .unwrap();
     let far_future = OffsetDateTime::now_utc().checked_add(span).unwrap();
     (yesterday, far_future)
 }
