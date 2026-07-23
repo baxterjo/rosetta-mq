@@ -6,6 +6,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::decoder::{DecodeError, Decoder};
+use crate::util::resolve_path;
 
 /// Per-topic config for the protobuf decoder: which `.proto` file to compile at runtime, which
 /// message type within it to decode payloads as, and any extra include paths the schema's
@@ -51,7 +52,7 @@ impl ProtobufDecoder {
         cfg: &ProtobufConfig,
         base_dir: &Path,
     ) -> Result<Self, ProtobufDecoderError> {
-        let proto_file = resolve(base_dir, &cfg.proto_file);
+        let proto_file = resolve_path(base_dir, &cfg.proto_file);
 
         // `proto_file`'s own directory is always searchable (protox requires the root file to
         // reside under one of the given include paths, same as `protoc`) -- `include_paths` are
@@ -59,7 +60,7 @@ impl ProtobufDecoder {
         // replacement for it.
         let mut include_paths: Vec<PathBuf> =
             vec![proto_file.parent().unwrap_or(base_dir).to_path_buf()];
-        include_paths.extend(cfg.include_paths.iter().map(|p| resolve(base_dir, p)));
+        include_paths.extend(cfg.include_paths.iter().map(|p| resolve_path(base_dir, p)));
 
         let file_descriptor_set =
             protox::compile([&proto_file], &include_paths).map_err(|source| {
@@ -78,15 +79,6 @@ impl ProtobufDecoder {
             message_type: cfg.message_type.clone(),
             descriptor,
         })
-    }
-}
-
-fn resolve(base_dir: &Path, path: &str) -> PathBuf {
-    let path = Path::new(path);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        base_dir.join(path)
     }
 }
 

@@ -102,20 +102,8 @@ impl AuthConfig {
     }
 }
 
-/// Resolves `path` against `base_dir` unless `path` is already absolute -- same convention as
-/// `ProtobufConfig::proto_file` (see `decoder::protobuf::resolve`), so cert/key paths in the
-/// config are relative to the config file's directory, not the process's CWD.
-fn resolve(base_dir: &Path, path: &str) -> PathBuf {
-    let path = Path::new(path);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        base_dir.join(path)
-    }
-}
-
 fn read(base_dir: &Path, file: &str) -> Result<Vec<u8>, AuthError> {
-    let path = resolve(base_dir, file);
+    let path = crate::util::resolve_path(base_dir, file);
     std::fs::read(&path).map_err(|source| AuthError::Io { path, source })
 }
 
