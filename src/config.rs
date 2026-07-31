@@ -38,6 +38,13 @@ pub struct BrokerConfig {
     pub port: u16,
     pub client_id: String,
     pub auth: Option<AuthConfig>,
+    /// Use TLS (or WSS when using websockets)
+    pub tls: bool,
+    /// When `tls` is set, accept the broker's certificate without any verification (no root
+    /// store, no hostname check) -- for self-hosted/dev brokers using a self-signed cert where
+    /// distributing a CA file isn't practical. Has no effect when `tls` is `false`.
+    #[serde(default)]
+    pub allow_self_signed_certs: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +92,7 @@ mod tests {
         host = "127.0.0.1"
         port = 1883
         client_id = "rosetta-mq"
+        tls = false
 
         [[topic]]
         topic_filter = "devices/+/raw"
@@ -129,6 +137,7 @@ mod tests {
             host = "127.0.0.1"
             port = 1883
             client_id = "x"
+            tls = false
 
             [[topic]]
             topic_filter = "devices/+/proto"
@@ -153,6 +162,7 @@ mod tests {
             host = "127.0.0.1"
             port = 8883
             client_id = "x"
+            tls = true
 
             [broker.auth]
             method = "mtls"
@@ -181,6 +191,7 @@ mod tests {
             host = "127.0.0.1"
             port = 1883
             client_id = "x"
+            tls = false
 
             [broker.auth]
             method = "userpass"
@@ -209,6 +220,7 @@ mod tests {
             host = "127.0.0.1"
             port = 1883
             client_id = "x"
+            tls = false
         "#,
         )
         .unwrap();
@@ -223,6 +235,7 @@ mod tests {
             host = "127.0.0.1"
             port = 1883
             client_id = "x"
+            tls = false
 
             [[topic]]
             topic_filter = "a/#/b"
@@ -230,6 +243,56 @@ mod tests {
         "#,
         );
         assert!(matches!(err, Err(ConfigError::InvalidTopicFilter { .. })));
+    }
+
+    #[test]
+    fn parses_tls_true() {
+        let config = Config::parse(
+            r#"
+            [broker]
+            host = "127.0.0.1"
+            port = 8883
+            client_id = "x"
+            tls = true
+        "#,
+        )
+        .unwrap();
+        assert!(config.broker.tls);
+    }
+
+    #[test]
+    fn rejects_broker_missing_tls() {
+        let err = Config::parse(
+            r#"
+            [broker]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+        "#,
+        );
+        assert!(matches!(err, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn allow_self_signed_certs_defaults_to_false() {
+        let config = Config::parse(VALID).unwrap();
+        assert!(!config.broker.allow_self_signed_certs);
+    }
+
+    #[test]
+    fn parses_allow_self_signed_certs_true() {
+        let config = Config::parse(
+            r#"
+            [broker]
+            host = "127.0.0.1"
+            port = 8883
+            client_id = "x"
+            tls = true
+            allow_self_signed_certs = true
+        "#,
+        )
+        .unwrap();
+        assert!(config.broker.allow_self_signed_certs);
     }
 
     #[test]

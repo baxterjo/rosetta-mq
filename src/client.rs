@@ -1,5 +1,12 @@
+use std::sync::Arc;
 use std::time::Duration;
 
+use rumqttc::tokio_rustls::rustls::{
+    self,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+    ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
+};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, Publish, QoS, TlsConfiguration, Transport};
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -14,6 +21,40 @@ pub enum BrokerError {
     Connection(#[from] rumqttc::ConnectionError),
 }
 
+#[derive(Debug, Error)]
+pub enum ClientInitError {
+    #[error("failed to parse {context} PEM: {source}")]
+    PemParse {
+        context: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("no private key found in client key file")]
+    MissingPrivateKey,
+    #[error("failed to load platform root certificates: {0:?}")]
+    NativeCerts(Vec<rustls_native_certs::Error>),
+    #[error("invalid client certificate/key: {0}")]
+    InvalidClientCert(#[from] rustls::Error),
+}
+
+fn parse_pem_certs(
+    pem: &[u8],
+    context: &'static str,
+) -> Result<Vec<CertificateDer<'static>>, ClientInitError> {
+    rustls_pemfile::certs(&mut &pem[..])
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| ClientInitError::PemParse { context, source })
+}
+
+fn parse_pem_private_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>, ClientInitError> {
+    rustls_pemfile::private_key(&mut &pem[..])
+        .map_err(|source| ClientInitError::PemParse {
+            context: "client private key",
+            source,
+        })?
+        .ok_or(ClientInitError::MissingPrivateKey)
+}
+
 /// A live connection to an MQTT broker: a client handle for publishing/subscribing, a channel of
 /// incoming messages, and the background task driving the underlying connection.
 pub struct MqttConnection {
@@ -22,28 +63,151 @@ pub struct MqttConnection {
     pub driver: JoinHandle<Result<(), BrokerError>>,
 }
 
-/// Builds the `MqttOptions` for `config`, applying `auth` on top -- separated from `connect`
-/// itself so the auth wiring can be asserted on directly in tests, without needing to spin up
-/// (or poll) the background event loop `connect` spawns.
-fn build_options(config: &BrokerConfig, auth: &ResolvedAuth) -> MqttOptions {
+/// Builds the `MqttOptions` for `config`, applying `tls`/`allow_self_signed_certs` and `auth` on
+/// top -- separated from `connect` itself so this wiring can be asserted on directly in tests,
+/// without needing to spin up (or poll) the background event loop `connect` spawns.
+///
+/// `config.tls` decides whether the connection is encrypted; `auth` only decides what
+/// credentials/client-cert to present -- except `mtls` auth can only ever present its client cert
+/// *during* a TLS handshake, so `tls = false` can't actually be honored alongside it. Rather than
+/// refusing to start, that combination just warns that `broker.tls` is being ignored and connects
+/// with TLS anyway.
+fn build_options(
+    config: &BrokerConfig,
+    auth: &ResolvedAuth,
+) -> Result<MqttOptions, ClientInitError> {
     let mut options = MqttOptions::new(config.client_id.clone(), config.host.clone(), config.port);
     options.set_keep_alive(Duration::from_secs(30));
 
-    match auth {
-        ResolvedAuth::None => {}
-        ResolvedAuth::UserPass { username, password } => {
-            options.set_credentials(username.clone(), password.clone());
-        }
-        ResolvedAuth::Mtls { ca, cert, key } => {
-            options.set_transport(Transport::Tls(TlsConfiguration::Simple {
-                ca: ca.clone(),
-                alpn: None,
-                client_auth: Some((cert.clone(), key.clone())),
-            }));
-        }
+    let tls = if !config.tls && matches!(auth, ResolvedAuth::Mtls { .. }) {
+        tracing::warn!(
+            "[broker.auth] method = \"mtls\" requires TLS; ignoring broker.tls = false and \
+             connecting with TLS anyway"
+        );
+        true
+    } else {
+        config.tls
+    };
+
+    if tls {
+        options.set_transport(Transport::Tls(build_tls_config(config, auth)?));
     }
 
-    options
+    if let ResolvedAuth::UserPass { username, password } = auth {
+        options.set_credentials(username.clone(), password.clone());
+    }
+
+    Ok(options)
+}
+
+/// Accepts any server certificate without verification -- used only when
+/// `allow_self_signed_certs` is set, since `rumqttc`'s own `TlsConfiguration` variants always
+/// verify the server cert against some root store (a custom CA or the OS-native one) and expose
+/// no "skip verification" option directly.
+#[derive(Debug)]
+struct NoServerCertVerification;
+
+impl ServerCertVerifier for NoServerCertVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA1,
+            SignatureScheme::ECDSA_SHA1_Legacy,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ]
+    }
+}
+
+/// Builds the `TlsConfiguration` for an encrypted connection -- always via
+/// `TlsConfiguration::Rustls`, i.e. a `rustls::ClientConfig` we assemble ourselves through its
+/// builder, rather than mixing in `rumqttc`'s own `TlsConfiguration::Simple`/`::default()`
+/// shortcuts. `rumqttc`'s own PEM-parsing helpers (`src/tls.rs`) are private to that crate, so any
+/// PEM bytes here (CA, client cert/key) are parsed via `rustls-pemfile` directly.
+///
+/// The builder has two independent stages, one per parameter:
+/// - Server verification: `allow_self_signed_certs` swaps the usual root-store check for a
+///   custom verifier that accepts anything; otherwise the root store is `auth`'s CA (`mtls`) or
+///   the OS-native trust store (`none`/`userpass`), matching `TlsConfiguration::Simple`/
+///   `::default()`'s behavior exactly, just built by hand.
+/// - Client identity: `auth` alone decides whether a client certificate is presented, regardless
+///   of how server verification above was configured.
+fn build_tls_config(
+    config: &BrokerConfig,
+    auth: &ResolvedAuth,
+) -> Result<TlsConfiguration, ClientInitError> {
+    // Configure how the server is verified.
+    let verifier_builder = if config.allow_self_signed_certs {
+        ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoServerCertVerification))
+    } else {
+        let mut roots = RootCertStore::empty();
+        match auth {
+            ResolvedAuth::Mtls { ca, .. } => {
+                roots.add_parsable_certificates(parse_pem_certs(ca, "CA certificate")?);
+            }
+            ResolvedAuth::None | ResolvedAuth::UserPass { .. } => {
+                let native_certs = rustls_native_certs::load_native_certs();
+                if !native_certs.errors.is_empty() {
+                    return Err(ClientInitError::NativeCerts(native_certs.errors));
+                }
+                roots.add_parsable_certificates(native_certs.certs);
+            }
+        }
+        ClientConfig::builder().with_root_certificates(roots)
+    };
+
+    // Configure how the client is authenticated.
+    let client_config = match auth {
+        ResolvedAuth::Mtls { cert, key, .. } => {
+            let cert_chain = parse_pem_certs(cert, "client certificate")?;
+            let key_der = parse_pem_private_key(key)?;
+            verifier_builder.with_client_auth_cert(cert_chain, key_der)?
+        }
+        ResolvedAuth::None | ResolvedAuth::UserPass { .. } => {
+            verifier_builder.with_no_client_auth()
+        }
+    };
+
+    Ok(TlsConfiguration::Rustls(Arc::new(client_config)))
 }
 
 pub struct Client;
@@ -55,9 +219,13 @@ impl Client {
     /// work this way means slow decoding never risks stalling keepalives.
     ///
     /// `auth` is already resolved (certs read, env vars looked up) by [`crate::auth::AuthConfig::build`]
-    /// before this is called, so connecting itself stays infallible and filesystem/env-free.
-    pub fn connect(config: &BrokerConfig, auth: &ResolvedAuth) -> MqttConnection {
-        let options = build_options(config, auth);
+    /// before this is called, so the only way this can fail is TLS material that reads as bytes
+    /// fine but doesn't parse as valid PEM/certs (see [`ClientInitError`]).
+    pub fn connect(
+        config: &BrokerConfig,
+        auth: &ResolvedAuth,
+    ) -> Result<MqttConnection, ClientInitError> {
+        let options = build_options(config, auth)?;
 
         let (client, mut eventloop) = AsyncClient::new(options, 100);
         let (tx, rx) = mpsc::channel(100);
@@ -77,11 +245,11 @@ impl Client {
             Ok(())
         });
 
-        MqttConnection {
+        Ok(MqttConnection {
             client,
             incoming: rx,
             driver,
-        }
+        })
     }
 
     /// Subscribes to every configured topic filter.
@@ -106,12 +274,39 @@ mod tests {
             port: 1883,
             client_id: "rosetta-mq-test".to_string(),
             auth: None,
+            tls: false,
+            allow_self_signed_certs: false,
         }
+    }
+
+    /// Minimal `tracing::Subscriber` that just records whether any `WARN`-level event fired --
+    /// enough to assert `build_options` actually warns, without pulling in a test-only tracing
+    /// crate for a single boolean check.
+    struct WarnCapture {
+        warned: std::sync::atomic::AtomicBool,
+    }
+
+    impl tracing::Subscriber for WarnCapture {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                self.warned.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
     }
 
     #[test]
     fn no_auth_leaves_options_unauthenticated() {
-        let options = build_options(&test_config(), &ResolvedAuth::None);
+        let options = build_options(&test_config(), &ResolvedAuth::None).unwrap();
         assert!(options.credentials().is_none());
         assert!(matches!(options.transport(), Transport::Tcp));
     }
@@ -122,7 +317,7 @@ mod tests {
             username: "device-reader".to_string(),
             password: "supersecret".to_string(),
         };
-        let options = build_options(&test_config(), &auth);
+        let options = build_options(&test_config(), &auth).unwrap();
 
         let login = options.credentials().expect("credentials to be set");
         assert_eq!(login.username, "device-reader");
@@ -132,25 +327,131 @@ mod tests {
 
     #[test]
     fn mtls_auth_sets_tls_transport_with_client_cert() {
+        // build_tls_config parses `ca`/`cert`/`key` as real PEM (it builds a `RootCertStore` from
+        // `ca` and a client identity from `cert`/`key` itself now), so this needs real fixture
+        // PEM input rather than placeholder bytes.
         let auth = ResolvedAuth::Mtls {
-            ca: b"ca-bytes".to_vec(),
-            cert: b"cert-bytes".to_vec(),
-            key: b"key-bytes".to_vec(),
+            ca: include_bytes!("../tests/fixtures/tls/ca.pem").to_vec(),
+            cert: include_bytes!("../tests/fixtures/tls/client-cert.pem").to_vec(),
+            key: include_bytes!("../tests/fixtures/tls/client-key.pem").to_vec(),
         };
-        let options = build_options(&test_config(), &auth);
+        let config = BrokerConfig {
+            tls: true,
+            ..test_config()
+        };
+        let options = build_options(&config, &auth).unwrap();
 
         assert!(options.credentials().is_none());
-        match options.transport() {
-            Transport::Tls(TlsConfiguration::Simple {
-                ca, client_auth, ..
-            }) => {
-                assert_eq!(ca, b"ca-bytes");
-                assert_eq!(
-                    client_auth,
-                    Some((b"cert-bytes".to_vec(), b"key-bytes".to_vec()))
-                );
-            }
-            _ => panic!("expected Tls(Simple {{ .. }}) transport"),
-        }
+        assert!(matches!(
+            options.transport(),
+            Transport::Tls(TlsConfiguration::Rustls(_))
+        ));
+    }
+
+    #[test]
+    fn tls_with_no_auth_uses_native_root_store() {
+        let config = BrokerConfig {
+            tls: true,
+            ..test_config()
+        };
+        let options = build_options(&config, &ResolvedAuth::None).unwrap();
+
+        assert!(options.credentials().is_none());
+        assert!(matches!(
+            options.transport(),
+            Transport::Tls(TlsConfiguration::Rustls(_))
+        ));
+    }
+
+    #[test]
+    fn tls_with_userpass_uses_native_root_store_and_sets_credentials() {
+        let auth = ResolvedAuth::UserPass {
+            username: "device-reader".to_string(),
+            password: "supersecret".to_string(),
+        };
+        let config = BrokerConfig {
+            tls: true,
+            ..test_config()
+        };
+        let options = build_options(&config, &auth).unwrap();
+
+        let login = options.credentials().expect("credentials to be set");
+        assert_eq!(login.username, "device-reader");
+        assert_eq!(login.password, "supersecret");
+        assert!(matches!(
+            options.transport(),
+            Transport::Tls(TlsConfiguration::Rustls(_))
+        ));
+    }
+
+    #[test]
+    fn mtls_without_tls_warns_and_connects_with_tls_anyway() {
+        // build_tls_config actually runs here (tls ends up true despite tls: false on the
+        // config), so this needs real fixture PEM input, not placeholder bytes.
+        let auth = ResolvedAuth::Mtls {
+            ca: include_bytes!("../tests/fixtures/tls/ca.pem").to_vec(),
+            cert: include_bytes!("../tests/fixtures/tls/client-cert.pem").to_vec(),
+            key: include_bytes!("../tests/fixtures/tls/client-key.pem").to_vec(),
+        };
+        let capture = Arc::new(WarnCapture {
+            warned: std::sync::atomic::AtomicBool::new(false),
+        });
+        let options = tracing::subscriber::with_default(capture.clone(), || {
+            build_options(&test_config(), &auth)
+        })
+        .unwrap();
+
+        assert!(matches!(
+            options.transport(),
+            Transport::Tls(TlsConfiguration::Rustls(_))
+        ));
+        assert!(options.credentials().is_none());
+        assert!(capture.warned.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn allow_self_signed_certs_skips_verification_with_mtls_client_cert() {
+        // Real PEM-encoded self-signed cert + key, and a matching client cert -- the insecure
+        // path still parses the client cert/key via rustls-pemfile, so it needs real PEM input,
+        // not placeholder bytes.
+        let cert_pem = include_bytes!("../tests/fixtures/tls/client-cert.pem").to_vec();
+        let key_pem = include_bytes!("../tests/fixtures/tls/client-key.pem").to_vec();
+        let auth = ResolvedAuth::Mtls {
+            ca: b"unused-when-self-signed-certs-are-allowed".to_vec(),
+            cert: cert_pem,
+            key: key_pem,
+        };
+        let config = BrokerConfig {
+            tls: true,
+            allow_self_signed_certs: true,
+            ..test_config()
+        };
+        let options = build_options(&config, &auth).unwrap();
+
+        assert!(matches!(
+            options.transport(),
+            Transport::Tls(TlsConfiguration::Rustls(_))
+        ));
+    }
+
+    #[test]
+    fn allow_self_signed_certs_skips_verification_with_userpass() {
+        let auth = ResolvedAuth::UserPass {
+            username: "device-reader".to_string(),
+            password: "supersecret".to_string(),
+        };
+        let config = BrokerConfig {
+            tls: true,
+            allow_self_signed_certs: true,
+            ..test_config()
+        };
+        let options = build_options(&config, &auth).unwrap();
+
+        let login = options.credentials().expect("credentials to be set");
+        assert_eq!(login.username, "device-reader");
+        assert!(matches!(
+            options.transport(),
+            Transport::Tls(TlsConfiguration::Rustls(_))
+        ));
     }
 }

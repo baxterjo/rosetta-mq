@@ -1836,6 +1836,8 @@ dependencies = [
  "rcgen",
  "rumqttc",
  "rumqttd",
+ "rustls-native-certs",
+ "rustls-pemfile 2.2.0",
  "serde",
  "serde_json",
  "tempdir",

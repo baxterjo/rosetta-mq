@@ -2,6 +2,8 @@
 
 IF `AGENTS-local.md` EXISTS IN THIS DIRECTORY, READ IT BEFORE READING THIS FILE.
 
+THIS PROJECT IS IN PRE-RELEASE NO BREAKING CHANGE NOTES ARE REQUIRED.
+
 ## What this is
 
 `rosetta-mq` is a standalone CLI tool for developers debugging IoT systems over MQTT.
