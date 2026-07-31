@@ -102,6 +102,8 @@ async fn subscribe_decode_republish_end_to_end() {
             port: TEST_PORT,
             client_id: "rosetta-mq-test".to_string(),
             auth: None,
+            tls: false,
+            allow_self_signed_certs: false,
         },
         topics: vec![
             TopicMapping {
@@ -123,7 +125,7 @@ async fn subscribe_decode_republish_end_to_end() {
     }
     let registry = builder.build();
 
-    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None);
+    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None).unwrap();
     Client::subscribe_all(
         &conn.client,
         app_config.topics.iter().map(|t| t.topic_filter.as_str()),
@@ -268,6 +270,8 @@ async fn protobuf_decoder_end_to_end() {
             port: PROTOBUF_TEST_PORT,
             client_id: "rosetta-mq-protobuf-test".to_string(),
             auth: None,
+            tls: false,
+            allow_self_signed_certs: false,
         },
         topics: vec![TopicMapping {
             topic_filter: "devices/+/proto".to_string(),
@@ -287,7 +291,7 @@ async fn protobuf_decoder_end_to_end() {
     }
     let registry = builder.build();
 
-    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None);
+    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None).unwrap();
     Client::subscribe_all(
         &conn.client,
         app_config.topics.iter().map(|t| t.topic_filter.as_str()),

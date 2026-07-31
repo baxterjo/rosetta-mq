@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
         None => rosetta_mq::auth::ResolvedAuth::None,
     };
 
-    let conn = Client::connect(&config.broker, &auth);
+    let conn = Client::connect(&config.broker, &auth).context("connecting to broker")?;
     Client::subscribe_all(
         &conn.client,
         config.topics.iter().map(|t| t.topic_filter.as_str()),

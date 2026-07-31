@@ -2,6 +2,8 @@
 
 IF `AGENTS-local.md` EXISTS IN THIS DIRECTORY, READ IT BEFORE READING THIS FILE.
 
+THIS PROJECT IS IN PRE-RELEASE NO BREAKING CHANGE NOTES ARE REQUIRED.
+
 ## What this is
 
 `rosetta-mq` is a standalone CLI tool for developers debugging IoT systems over MQTT.
@@ -68,7 +70,9 @@ don't build toward those speculatively unless asked.
   new codecs will be added frequently.
 - Code comments and doc comments should never reference the past state of the codebase. They are only to document the current state.
 - When running tests, always use cargo-nextest.
--= Any changes to config must come with a corresponding change to the README.
+- Any changes to config must come with a corresponding change to the README.
+- When adding comments on how a particular function works. Prefer regular comments as opposed to doc comments. Doc comments should only document the high level "black box" behavior of a function and maybe describing an unintuitive behavior, not the line by line decisions the code makes. 
+
 
 
 

@@ -39,6 +39,7 @@ fn relative_proto_file_resolves_against_config_directory_not_process_cwd() {
         host = "127.0.0.1"
         port = 1883
         client_id = "rosetta-mq"
+        tls = false
 
         [[topic]]
         topic_filter = "devices/+/raw"

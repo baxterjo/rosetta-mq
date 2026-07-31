@@ -5,7 +5,7 @@ A general purpose MQTT decode tool for debugging MQTT based applications.
 `rosetta-mq` subscribes to a broker, decodes message payloads that arrive in
 various encoded formats (UTF-8 text, hex/binary, Protobuf, ...), and
 republishes a human-readable version of each message back to the same broker
-on a mirrored topic (e.g. `devices/42/raw` -> `devices/42/decoded`). Point it
+on a mirrored topic (e.g. `devices/42` -> `devices/42/decoded`). Point it
 at a broker and topic filter, and readable payloads start showing up on a
 parallel topic that any existing MQTT client (MQTT Explorer, MQTTX,
 `mosquitto_sub`, etc.) can subscribe to.
@@ -33,6 +33,7 @@ topic filter to a decoder.
 host = "127.0.0.1"
 port = 1883
 client_id = "rosetta-mq"
+tls = false
 
 [[topic]]
 topic_filter = "devices/+/raw"
@@ -54,12 +55,15 @@ include_paths = ["schemas/common"]
 
 ### `[broker]`
 
-| Field       | Description                                  |
-|-------------|-----------------------------------------------|
-| `host`      | Broker hostname or IP address.                |
-| `port`      | Broker port (e.g. `1883`).                    |
-| `client_id` | MQTT client ID used for this connection.      |
-| `auth`      | Optional `[broker.auth]` table (see below). Omit entirely for an unauthenticated connection. |
+| Field                     | Description                                  |
+|---------------------------|-----------------------------------------------|
+| `host`                    | Broker hostname or IP address.                |
+| `port`                    | Broker port (e.g. `1883`).                    |
+| `client_id`               | MQTT client ID used for this connection.      |
+| `tls`                     | **Required.** `true`/`false` — whether the connection is encrypted. No default: a setting that turns encryption on/off must be stated explicitly. |
+| `allow_self_signed_certs` | Optional, defaults to `false`. When `tls` is `true`, accept the broker's certificate with no verification at all (no root store, no hostname check) — for self-hosted/dev brokers using a self-signed cert where distributing a CA file isn't practical. |
+| `auth`                    | Optional `[broker.auth]` table (see below). Omit entirely for an unauthenticated connection. |
+
 
 ### `[broker.auth]`
 
@@ -73,6 +77,8 @@ ca_file = "certs/ca.pem"
 cert_file = "certs/client.pem"
 key_file = "certs/client.key"
 ```
+
+(`tls = true` must also be set on `[broker]` — see above.)
 
 ```toml
 [broker.auth]
@@ -94,13 +100,13 @@ decoder named by `decoder`, plus that decoder's own fields as siblings.
 
 If more than one `[[topic]]` block matches the same incoming topic, the most
 specific one wins — an exact-match filter is preferred over a wildcard filter
-that also matches (e.g. `devices/42/raw` beats `devices/+/raw`).
+that also matches (e.g. `devices/42` beats `devices/#`).
 
 Built-in decoders:
 
 | `decoder`    | Extra fields                                                                 | Description                                      |
 |--------------|-------------------------------------------------------------------------------|---------------------------------------------------|
-| `"utf8"`     | —                                                                              | Decodes the payload as UTF-8 text.                |
+| `"utf8"`     | —                                                                              | Decodes the payload as UTF-8 text. (Mostly used for testing)                |
 | `"hexdump"`  | —                                                                              | Renders the raw payload bytes as hex.             |
 | `"protobuf"` | `proto_file`, `message_type`, `include_paths` (optional)                     | Decodes a Protobuf payload to JSON using a schema.|
 
@@ -133,7 +139,7 @@ broker:
 - `{topic}/decode_error` — an error message plus the raw payload as hex, if
   no decoder matched or decoding failed. A message is never silently dropped.
 
-For example, a message on `devices/42/raw` produces either
+For example, a message on `devices/42` produces either
 `devices/42/decoded` or `devices/42/decode_error`. Stop `rosetta-mq` at any
 time with `Ctrl+C`.
 
