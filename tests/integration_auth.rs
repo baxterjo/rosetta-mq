@@ -9,6 +9,7 @@ use tokio::time::timeout;
 use rosetta_mq::auth::{AuthConfig, MtlsConfig, PasswordSource, UserPassConfig};
 use rosetta_mq::client::Client;
 use rosetta_mq::config::BrokerConfig;
+use rosetta_mq::protocol::Protocol;
 
 const MTLS_TEST_PORT: u16 = 18885;
 const USERPASS_TEST_PORT: u16 = 18886;
@@ -123,6 +124,7 @@ async fn mtls_auth_connects_and_round_trips() {
         client_id: "rosetta-mq-mtls-test".to_string(),
         auth: None,
         tls: true,
+        protocol: Protocol::Mqtt,
         allow_self_signed_certs: false,
     };
     let auth_config = AuthConfig::Mtls(MtlsConfig {
@@ -159,6 +161,7 @@ async fn userpass_auth_connects_and_round_trips() {
         client_id: "rosetta-mq-userpass-test".to_string(),
         auth: None,
         tls: false,
+        protocol: Protocol::Mqtt,
         allow_self_signed_certs: false,
     };
     let auth_config = AuthConfig::UserPass(UserPassConfig {
@@ -207,6 +210,7 @@ async fn self_signed_cert_connects_with_allow_self_signed_certs() {
         client_id: "rosetta-mq-self-signed-test".to_string(),
         auth: None,
         tls: true,
+        protocol: Protocol::Mqtt,
         allow_self_signed_certs: true,
     };
     let auth_config = AuthConfig::Mtls(MtlsConfig {

@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 
 use crate::auth::ResolvedAuth;
 use crate::config::BrokerConfig;
+use crate::protocol::Protocol;
 
 #[derive(Debug, Error)]
 pub enum BrokerError {
@@ -63,17 +64,14 @@ pub struct MqttConnection {
     pub driver: JoinHandle<Result<(), BrokerError>>,
 }
 
-/// Builds the `MqttOptions` for `config`, applying `tls`/`allow_self_signed_certs` and `auth` on
-/// top.
+/// Builds the `MqttOptions` for `config`, applying `tls`/`allow_self_signed_certs`, `protocol`,
+/// and `auth` on top.
 ///
 /// `config.tls = false` is ignored if `broker.auth.method = mtls`
 fn build_options(
     config: &BrokerConfig,
     auth: &ResolvedAuth,
 ) -> Result<MqttOptions, ClientInitError> {
-    let mut options = MqttOptions::new(config.client_id.clone(), config.host.clone(), config.port);
-    options.set_keep_alive(Duration::from_secs(30));
-
     let tls = if !config.tls && matches!(auth, ResolvedAuth::Mtls { .. }) {
         tracing::warn!(
             "[broker.auth] method = \"mtls\" requires TLS; ignoring broker.tls = false and \
@@ -84,8 +82,31 @@ fn build_options(
         config.tls
     };
 
+    // `protocol = "ws"` takes the full ws(s)://host:port/path URL as the "host" argument --
+    // rumqttc parses domain/port back out of it at connect time and ignores the separate numeric
+    // port field in that case.
+    let mut options = match &config.protocol {
+        Protocol::Mqtt => {
+            tracing::info!("connecting to mqtt://{}:{}", config.host, config.port);
+            MqttOptions::new(config.client_id.clone(), config.host.clone(), config.port)
+        }
+        Protocol::Ws(ws) => {
+            let scheme = if tls { "wss" } else { "ws" };
+            let url = format!("{scheme}://{}:{}{}", config.host, config.port, ws.path);
+            tracing::info!("connecting to {url}");
+            MqttOptions::new(config.client_id.clone(), url, config.port)
+        }
+    };
+    options.set_keep_alive(Duration::from_secs(30));
+
     if tls {
-        options.set_transport(Transport::Tls(build_tls_config(config, auth)?));
+        let tls_config = build_tls_config(config, auth)?;
+        options.set_transport(match &config.protocol {
+            Protocol::Mqtt => Transport::Tls(tls_config),
+            Protocol::Ws(_) => Transport::Wss(tls_config),
+        });
+    } else if matches!(&config.protocol, Protocol::Ws(_)) {
+        options.set_transport(Transport::Ws);
     }
 
     if let ResolvedAuth::UserPass { username, password } = auth {
@@ -248,6 +269,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::WebsocketConfig;
 
     fn test_config() -> BrokerConfig {
         BrokerConfig {
@@ -256,7 +278,17 @@ mod tests {
             client_id: "rosetta-mq-test".to_string(),
             auth: None,
             tls: false,
+            protocol: Protocol::Mqtt,
             allow_self_signed_certs: false,
+        }
+    }
+
+    fn websocket_config() -> BrokerConfig {
+        BrokerConfig {
+            protocol: Protocol::Ws(WebsocketConfig {
+                path: "/mqtt".to_string(),
+            }),
+            ..test_config()
         }
     }
 
@@ -402,5 +434,96 @@ mod tests {
             options.transport(),
             Transport::Tls(TlsConfiguration::Rustls(_))
         ));
+    }
+
+    #[test]
+    fn websocket_no_tls_uses_ws_transport_and_url_host() {
+        let options = build_options(&websocket_config(), &ResolvedAuth::None).unwrap();
+
+        assert!(options.credentials().is_none());
+        assert!(matches!(options.transport(), Transport::Ws));
+        assert_eq!(
+            options.broker_address(),
+            ("ws://127.0.0.1:1883/mqtt".to_string(), 1883)
+        );
+    }
+
+    #[test]
+    fn websocket_no_tls_userpass_sets_credentials_and_ws_transport() {
+        let auth = ResolvedAuth::UserPass {
+            username: "device-reader".to_string(),
+            password: "supersecret".to_string(),
+        };
+        let options = build_options(&websocket_config(), &auth).unwrap();
+
+        let login = options.credentials().expect("credentials to be set");
+        assert_eq!(login.username, "device-reader");
+        assert_eq!(login.password, "supersecret");
+        assert!(matches!(options.transport(), Transport::Ws));
+    }
+
+    #[test]
+    fn websocket_tls_mtls_sets_wss_transport_with_client_cert() {
+        let auth = ResolvedAuth::Mtls {
+            ca: include_bytes!("../tests/fixtures/tls/ca.pem").to_vec(),
+            cert: include_bytes!("../tests/fixtures/tls/client-cert.pem").to_vec(),
+            key: include_bytes!("../tests/fixtures/tls/client-key.pem").to_vec(),
+        };
+        let config = BrokerConfig {
+            tls: true,
+            ..websocket_config()
+        };
+        let options = build_options(&config, &auth).unwrap();
+
+        assert!(options.credentials().is_none());
+        assert!(matches!(
+            options.transport(),
+            Transport::Wss(TlsConfiguration::Rustls(_))
+        ));
+        assert_eq!(
+            options.broker_address(),
+            ("wss://127.0.0.1:1883/mqtt".to_string(), 1883)
+        );
+    }
+
+    #[test]
+    fn websocket_tls_userpass_uses_native_root_store_and_sets_credentials() {
+        let auth = ResolvedAuth::UserPass {
+            username: "device-reader".to_string(),
+            password: "supersecret".to_string(),
+        };
+        let config = BrokerConfig {
+            tls: true,
+            ..websocket_config()
+        };
+        let options = build_options(&config, &auth).unwrap();
+
+        let login = options.credentials().expect("credentials to be set");
+        assert_eq!(login.username, "device-reader");
+        assert_eq!(login.password, "supersecret");
+        assert!(matches!(
+            options.transport(),
+            Transport::Wss(TlsConfiguration::Rustls(_))
+        ));
+    }
+
+    #[test]
+    fn websocket_mtls_without_tls_connects_with_wss_anyway() {
+        let auth = ResolvedAuth::Mtls {
+            ca: include_bytes!("../tests/fixtures/tls/ca.pem").to_vec(),
+            cert: include_bytes!("../tests/fixtures/tls/client-cert.pem").to_vec(),
+            key: include_bytes!("../tests/fixtures/tls/client-key.pem").to_vec(),
+        };
+        let options = build_options(&websocket_config(), &auth).unwrap();
+
+        assert!(matches!(
+            options.transport(),
+            Transport::Wss(TlsConfiguration::Rustls(_))
+        ));
+        assert_eq!(
+            options.broker_address(),
+            ("wss://127.0.0.1:1883/mqtt".to_string(), 1883)
+        );
+        assert!(options.credentials().is_none());
     }
 }
