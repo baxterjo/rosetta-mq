@@ -1,8 +1,15 @@
 [package]
 name = "rosetta-mq"
-version = "0.1.0"
+authors = ["Jordan Baxter"]
+description = "A general purpose MQTT decoding tool for debugging MQTT based applications."
+repository = "https://github.com/baxterjo/rosetta-mq"
+readme = "README.md"
+keywords = ["mqtt", "iot", "protobuf"]
+categories = ["command-line-utilities", "encoding", "network-programming"]
+version = "0.0.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+rust-version = "1.85.1"
 
 [lib]
 name = "rosetta_mq"
@@ -18,7 +25,13 @@ default = ["cli"]
 cli = ["dep:clap", "dep:tracing-subscriber", "dep:anyhow"]
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "time"] }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "sync",
+  "signal",
+  "time",
+] }
 rumqttc = { version = "0.25", features = ["websocket"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
@@ -32,7 +45,9 @@ prost-reflect = { version = "0.16", features = ["serde"] }
 protox = "0.9"
 serde_json = "1"
 clap = { version = "4", features = ["derive"], optional = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+tracing-subscriber = { version = "0.3", features = [
+  "env-filter",
+], optional = true }
 anyhow = { version = "1", optional = true }
 
 [dev-dependencies]
