@@ -60,10 +60,10 @@ include_paths = ["schemas/common"]
 | `host`                    | Broker hostname or IP address.                |
 | `port`                    | Broker port (e.g. `1883`).                    |
 | `client_id`               | MQTT client ID used for this connection.      |
-| `tls`                     | **Required.** `true`/`false` — whether the connection is encrypted. No default: a setting that turns encryption on/off must be stated explicitly. |
+| `tls`                     | **Required.** `true`/`false` — whether the connection is encrypted. |
 | `allow_self_signed_certs` | Optional, defaults to `false`. When `tls` is `true`, accept the broker's certificate with no verification at all (no root store, no hostname check) — for self-hosted/dev brokers using a self-signed cert where distributing a CA file isn't practical. |
 | `auth`                    | Optional `[broker.auth]` table (see below). Omit entirely for an unauthenticated connection. |
-| `protocol`                | Optional, defaults to `"mqtt"`. `"mqtt"` connects over plain TCP; `"ws"` connects over a websocket upgrade and takes an additional `path` field — see below. |
+| `protocol`                | Optional, defaults to `"mqtt"`. `"mqtt"` connects over plain TCP/TLS; `"ws"` connects over a websocket upgrade and takes an additional `path` field — see below. |
 
 
 ### `[broker.auth]`
@@ -103,10 +103,8 @@ is only meaningful (and only allowed) alongside `protocol = "ws"`.
 ```toml
 [broker]
 protocol = "ws"
-# Optional; empty by default (connects at the bare host:port, which most
-# brokers normalize to "/"). Set explicitly for brokers that mount MQTT
-# websocket traffic at a specific path, e.g. "/mqtt" (EMQX, HiveMQ, VerneMQ,
-# AWS IoT) or "/ws" (RabbitMQ's Web-MQTT plugin).
+# Optional; "/ws" by default. Set explicitly for brokers that mount MQTT
+# websocket traffic at a specific path, e.g. "/mqtt" or "/ws".
 path = "/mqtt"
 ```
 
