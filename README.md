@@ -60,9 +60,10 @@ include_paths = ["schemas/common"]
 | `host`                    | Broker hostname or IP address.                |
 | `port`                    | Broker port (e.g. `1883`).                    |
 | `client_id`               | MQTT client ID used for this connection.      |
-| `tls`                     | **Required.** `true`/`false` — whether the connection is encrypted. No default: a setting that turns encryption on/off must be stated explicitly. |
+| `tls`                     | **Required.** `true`/`false` — whether the connection is encrypted. |
 | `allow_self_signed_certs` | Optional, defaults to `false`. When `tls` is `true`, accept the broker's certificate with no verification at all (no root store, no hostname check) — for self-hosted/dev brokers using a self-signed cert where distributing a CA file isn't practical. |
 | `auth`                    | Optional `[broker.auth]` table (see below). Omit entirely for an unauthenticated connection. |
+| `protocol`                | Optional, defaults to `"mqtt"`. `"mqtt"` connects over plain TCP/TLS; `"ws"` connects over a websocket upgrade and takes an additional `path` field — see below. |
 
 
 ### `[broker.auth]`
@@ -91,6 +92,25 @@ password = { env = "MQTT_PASSWORD" } # or a literal string: password = "supersec
 |-------------|--------------------------------------------|---------------------------------------------------------------------|
 | `"mtls"`    | `ca_file`, `cert_file`, `key_file`         | Mutual TLS: CA cert, client cert, and client private key (PEM), each resolved relative to the config file's directory. |
 | `"userpass"`| `username`, `password`                    | Username/password auth. `password` is either a literal string, or `{ env = "VAR_NAME" }` to read it from an environment variable instead of storing it in the config file. |
+
+### `protocol = "ws"`
+
+Set `protocol = "ws"` when the broker only exposes MQTT over a websocket
+upgrade — common for browser-facing and cloud-hosted brokers. `ws`-vs-`wss`
+follows the same `tls` flag already documented above for plain TCP. `path`
+is only meaningful (and only allowed) alongside `protocol = "ws"`.
+
+```toml
+[broker]
+protocol = "ws"
+# Optional; "/ws" by default. Set explicitly for brokers that mount MQTT
+# websocket traffic at a specific path, e.g. "/mqtt" or "/ws".
+path = "/mqtt"
+```
+
+| Field  | Description                                                        |
+|--------|---------------------------------------------------------------------|
+| `path` | Optional, defaults to `/ws`. Path the websocket upgrade request is made against. Only valid when `protocol = "ws"`. |
 
 ### `[[topic]]`
 

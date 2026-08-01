@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
-use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS, Transport};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -13,10 +13,12 @@ use rosetta_mq::config::{BrokerConfig, Config, TopicMapping};
 use rosetta_mq::decoder::protobuf::ProtobufConfig;
 use rosetta_mq::decoder::{DecoderConfig, DecoderRegistryBuilder};
 use rosetta_mq::pipeline;
+use rosetta_mq::protocol::{Protocol, WebsocketConfig};
 use rosetta_mq::topic::TopicFilter;
 
 const TEST_PORT: u16 = 18883;
 const PROTOBUF_TEST_PORT: u16 = 18884;
+const WEBSOCKET_TEST_PORT: u16 = 18888;
 const PROTO_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/protobuf/device.proto"
@@ -67,6 +69,51 @@ fn rumqttd_config(port: u16) -> rumqttd::Config {
     }
 }
 
+/// Same shape as `rumqttd_config`, but listens for websocket connections (`ws`) instead of raw
+/// TCP (`v4`) -- rumqttd's websocket listener doesn't validate the request path, so any
+/// `WebsocketConfig.path` the client sends is accepted.
+fn rumqttd_ws_config(port: u16) -> rumqttd::Config {
+    let listen: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    let mut ws = HashMap::new();
+    ws.insert(
+        "test".to_string(),
+        rumqttd::ServerSettings {
+            name: "test".to_string(),
+            listen,
+            tls: None,
+            next_connection_delay_ms: 1,
+            connections: rumqttd::ConnectionSettings {
+                connection_timeout_ms: 5000,
+                max_payload_size: 20 * 1024,
+                max_inflight_count: 100,
+                auth: None,
+                external_auth: None,
+                dynamic_filters: false,
+            },
+        },
+    );
+
+    rumqttd::Config {
+        id: 0,
+        router: rumqttd::RouterConfig {
+            max_connections: 10,
+            max_outgoing_packet_count: 200,
+            max_segment_size: 1024 * 1024,
+            max_segment_count: 10,
+            ..Default::default()
+        },
+        v4: None,
+        v5: None,
+        ws: Some(ws),
+        cluster: None,
+        console: None,
+        bridge: None,
+        prometheus: None,
+        metrics: None,
+    }
+}
+
 async fn wait_for_port(port: u16) {
     let addr = format!("127.0.0.1:{port}");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -103,6 +150,7 @@ async fn subscribe_decode_republish_end_to_end() {
             client_id: "rosetta-mq-test".to_string(),
             auth: None,
             tls: false,
+            protocol: Protocol::Mqtt,
             allow_self_signed_certs: false,
         },
         topics: vec![
@@ -271,6 +319,7 @@ async fn protobuf_decoder_end_to_end() {
             client_id: "rosetta-mq-protobuf-test".to_string(),
             auth: None,
             tls: false,
+            protocol: Protocol::Mqtt,
             allow_self_signed_certs: false,
         },
         topics: vec![TopicMapping {
@@ -365,4 +414,104 @@ async fn protobuf_decoder_end_to_end() {
     assert_eq!(json["temperature_c"], 21.5);
     assert_eq!(json["online"], true);
     assert_eq!(json["status"], "CONNECTION_STATUS_ONLINE");
+}
+
+/// Proves the websocket transport carries real traffic end-to-end -- same embedded-broker shape
+/// as `subscribe_decode_republish_end_to_end`, but both the pipeline's connection and the
+/// observer connection go over `ws://` instead of raw TCP. Doesn't repeat every case from the TCP
+/// test; just proves messages round-trip over websocket the same way they do over TCP.
+#[tokio::test]
+async fn websocket_end_to_end() {
+    let broker_config = rumqttd_ws_config(WEBSOCKET_TEST_PORT);
+    std::thread::spawn(move || {
+        let mut broker = rumqttd::Broker::new(broker_config);
+        let _ = broker.start();
+    });
+    wait_for_port(WEBSOCKET_TEST_PORT).await;
+
+    let app_config = Config {
+        broker: BrokerConfig {
+            host: "127.0.0.1".to_string(),
+            port: WEBSOCKET_TEST_PORT,
+            client_id: "rosetta-mq-websocket-test".to_string(),
+            auth: None,
+            tls: false,
+            protocol: Protocol::Ws(WebsocketConfig {
+                path: "/mqtt".to_string(),
+            }),
+            allow_self_signed_certs: false,
+        },
+        topics: vec![TopicMapping {
+            topic_filter: "devices/+/raw".to_string(),
+            decoder: DecoderConfig::Utf8,
+        }],
+    };
+
+    let mut builder = DecoderRegistryBuilder::new();
+    for mapping in &app_config.topics {
+        let decoder = mapping.decoder.build(Path::new(".")).unwrap();
+        let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
+        builder.register(filter, decoder).unwrap();
+    }
+    let registry = builder.build();
+
+    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None).unwrap();
+    Client::subscribe_all(
+        &conn.client,
+        app_config.topics.iter().map(|t| t.topic_filter.as_str()),
+    )
+    .await
+    .unwrap();
+
+    let pipeline_client = conn.client.clone();
+    tokio::spawn(pipeline::run(conn.incoming, pipeline_client, registry));
+
+    // The broker only has a `ws` listener (no `v4`), so the observer client also connects over
+    // websocket.
+    let mut options = MqttOptions::new(
+        "test-observer-websocket",
+        format!("ws://127.0.0.1:{WEBSOCKET_TEST_PORT}/mqtt"),
+        WEBSOCKET_TEST_PORT,
+    );
+    options.set_keep_alive(Duration::from_secs(30));
+    options.set_transport(Transport::Ws);
+    let (test_client, mut test_eventloop) = AsyncClient::new(options, 100);
+
+    let (tx, mut rx) = mpsc::channel(10);
+    tokio::spawn(async move {
+        loop {
+            match test_eventloop.poll().await {
+                Ok(Event::Incoming(Packet::Publish(publish))) => {
+                    if tx
+                        .send((publish.topic, publish.payload.to_vec()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    test_client
+        .subscribe("devices/42/raw/decoded", QoS::AtLeastOnce)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    test_client
+        .publish("devices/42/raw", QoS::AtLeastOnce, false, "hello over ws")
+        .await
+        .unwrap();
+
+    let (topic, payload) = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for decoded message over websocket")
+        .expect("channel closed");
+    assert_eq!(topic, "devices/42/raw/decoded");
+    assert_eq!(String::from_utf8(payload).unwrap(), "hello over ws");
 }

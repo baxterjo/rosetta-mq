@@ -5,6 +5,7 @@ use thiserror::Error;
 
 use crate::auth::AuthConfig;
 use crate::decoder::DecoderConfig;
+use crate::protocol::Protocol;
 use crate::topic::{TopicError, TopicFilter};
 
 #[derive(Debug, Error)]
@@ -40,6 +41,9 @@ pub struct BrokerConfig {
     pub auth: Option<AuthConfig>,
     /// Use TLS (or WSS when using websockets)
     pub tls: bool,
+    /// Which protocol carries the connection. Defaults to `mqtt` (plain TCP) when omitted.
+    #[serde(flatten, default)]
+    pub protocol: Protocol,
     /// When `tls` is set, accept the broker's certificate without any verification (no root
     /// store, no hostname check) -- for self-hosted/dev brokers using a self-signed cert where
     /// distributing a CA file isn't practical. Has no effect when `tls` is `false`.
@@ -64,8 +68,19 @@ impl Config {
     }
 
     fn parse(raw: &str) -> Result<Self, ConfigError> {
-        let config: Config = toml::from_str(raw)?;
+        let mut value: toml::Value = toml::from_str(raw)?;
+        // `Protocol`'s `#[serde(flatten)]` can't fall back to its `Default` impl when the
+        // `protocol` key is missing entirely -- known serde limitation, flatten + default don't
+        // compose for enums (https://github.com/serde-rs/serde/issues/1626) -- so inject the
+        // default explicitly before deserializing.
+        if let Some(broker) = value.get_mut("broker").and_then(toml::Value::as_table_mut) {
+            broker
+                .entry("protocol")
+                .or_insert_with(|| toml::Value::String("mqtt".to_string()));
+        }
+        let mut config: Config = value.try_into()?;
         config.validate()?;
+        config.normalize();
         Ok(config)
     }
 
@@ -80,6 +95,12 @@ impl Config {
             })?;
         }
         Ok(())
+    }
+
+    fn normalize(&mut self) {
+        if let Protocol::Ws(ws) = &mut self.broker.protocol {
+            ws.normalize();
+        }
     }
 }
 
@@ -152,6 +173,57 @@ mod tests {
     fn defaults_to_none_when_broker_auth_omitted() {
         let config = Config::parse(VALID).unwrap();
         assert!(config.broker.auth.is_none());
+    }
+
+    #[test]
+    fn defaults_to_mqtt_protocol_when_omitted() {
+        let config = Config::parse(VALID).unwrap();
+        assert!(matches!(
+            config.broker.protocol,
+            crate::protocol::Protocol::Mqtt
+        ));
+    }
+
+    #[test]
+    fn parses_ws_protocol_with_path() {
+        let config = Config::parse(
+            r#"
+            [broker]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+            tls = false
+            protocol = "ws"
+            path = "/mqtt"
+        "#,
+        )
+        .unwrap();
+
+        match config.broker.protocol {
+            crate::protocol::Protocol::Ws(ws) => assert_eq!(ws.path, "/mqtt"),
+            other => panic!("expected ws protocol, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalizes_ws_path_missing_leading_slash() {
+        let config = Config::parse(
+            r#"
+            [broker]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+            tls = false
+            protocol = "ws"
+            path = "mqtt"
+        "#,
+        )
+        .unwrap();
+
+        match config.broker.protocol {
+            crate::protocol::Protocol::Ws(ws) => assert_eq!(ws.path, "/mqtt"),
+            other => panic!("expected ws protocol, got {other:?}"),
+        }
     }
 
     #[test]
