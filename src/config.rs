@@ -24,6 +24,8 @@ pub enum ConfigError {
         #[source]
         source: TopicError,
     },
+    #[error("pipeline.max_concurrent_decodes must be at least 1")]
+    InvalidPipelineConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,6 +33,29 @@ pub struct Config {
     pub broker: BrokerConfig,
     #[serde(rename = "topic", default)]
     pub topics: Vec<TopicMapping>,
+    #[serde(default)]
+    pub pipeline: PipelineConfig,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PipelineConfig {
+    /// Maximum number of incoming messages decoded and republished concurrently.
+    #[serde(default = "PipelineConfig::default_max_concurrent_decodes")]
+    pub max_concurrent_decodes: usize,
+}
+
+impl PipelineConfig {
+    fn default_max_concurrent_decodes() -> usize {
+        100
+    }
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_decodes: Self::default_max_concurrent_decodes(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +118,9 @@ impl Config {
                     source,
                 }
             })?;
+        }
+        if self.pipeline.max_concurrent_decodes == 0 {
+            return Err(ConfigError::InvalidPipelineConfig);
         }
         Ok(())
     }
@@ -365,6 +393,47 @@ mod tests {
         )
         .unwrap();
         assert!(config.broker.allow_self_signed_certs);
+    }
+
+    #[test]
+    fn defaults_max_concurrent_decodes_when_pipeline_omitted() {
+        let config = Config::parse(VALID).unwrap();
+        assert_eq!(config.pipeline.max_concurrent_decodes, 100);
+    }
+
+    #[test]
+    fn parses_pipeline_max_concurrent_decodes() {
+        let config = Config::parse(
+            r#"
+            [broker]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+            tls = false
+
+            [pipeline]
+            max_concurrent_decodes = 5
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.pipeline.max_concurrent_decodes, 5);
+    }
+
+    #[test]
+    fn rejects_zero_max_concurrent_decodes() {
+        let err = Config::parse(
+            r#"
+            [broker]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+            tls = false
+
+            [pipeline]
+            max_concurrent_decodes = 0
+        "#,
+        );
+        assert!(matches!(err, Err(ConfigError::InvalidPipelineConfig)));
     }
 
     #[test]

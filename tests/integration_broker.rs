@@ -1,17 +1,23 @@
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS, Transport};
-use tokio::sync::mpsc;
+use async_trait::async_trait;
+use rumqttc::{AsyncClient, Event, MqttOptions, Packet, Publish, QoS, Transport};
+use tokio::sync::mpsc::{self, Sender};
 use tokio::time::timeout;
 
 use rosetta_mq::auth::ResolvedAuth;
 use rosetta_mq::client::Client;
-use rosetta_mq::config::{BrokerConfig, Config, TopicMapping};
+use rosetta_mq::config::{BrokerConfig, Config, PipelineConfig, TopicMapping};
 use rosetta_mq::decoder::protobuf::ProtobufConfig;
-use rosetta_mq::decoder::{DecoderConfig, DecoderRegistryBuilder};
+use rosetta_mq::decoder::{
+    DecodeError, DecodePublish, Decoder, DecoderConfig, DecoderRegistryBuilder,
+};
 use rosetta_mq::pipeline;
 use rosetta_mq::protocol::{Protocol, WebsocketConfig};
 use rosetta_mq::topic::TopicFilter;
@@ -19,6 +25,7 @@ use rosetta_mq::topic::TopicFilter;
 const TEST_PORT: u16 = 18883;
 const PROTOBUF_TEST_PORT: u16 = 18884;
 const WEBSOCKET_TEST_PORT: u16 = 18888;
+const CONCURRENCY_TEST_PORT: u16 = 18889;
 const PROTO_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/protobuf/device.proto"
@@ -163,6 +170,7 @@ async fn subscribe_decode_republish_end_to_end() {
                 decoder: DecoderConfig::Hexdump,
             },
         ],
+        pipeline: PipelineConfig::default(),
     };
 
     let mut builder = DecoderRegistryBuilder::new();
@@ -182,7 +190,12 @@ async fn subscribe_decode_republish_end_to_end() {
     .unwrap();
 
     let pipeline_client = conn.client.clone();
-    tokio::spawn(pipeline::run(conn.incoming, pipeline_client, registry));
+    tokio::spawn(pipeline::run(
+        conn.incoming,
+        pipeline_client,
+        registry,
+        app_config.pipeline.max_concurrent_decodes,
+    ));
 
     // 3. A second, independent rumqttc client plays the role of "any existing MQTT client"
     // observing the mirrored topics.
@@ -330,6 +343,7 @@ async fn protobuf_decoder_end_to_end() {
                 include_paths: vec![FIXTURES_DIR.to_string()],
             }),
         }],
+        pipeline: PipelineConfig::default(),
     };
 
     let mut builder = DecoderRegistryBuilder::new();
@@ -349,7 +363,12 @@ async fn protobuf_decoder_end_to_end() {
     .unwrap();
 
     let pipeline_client = conn.client.clone();
-    tokio::spawn(pipeline::run(conn.incoming, pipeline_client, registry));
+    tokio::spawn(pipeline::run(
+        conn.incoming,
+        pipeline_client,
+        registry,
+        app_config.pipeline.max_concurrent_decodes,
+    ));
 
     let mut options = MqttOptions::new("test-observer-protobuf", "127.0.0.1", PROTOBUF_TEST_PORT);
     options.set_keep_alive(Duration::from_secs(30));
@@ -445,6 +464,7 @@ async fn websocket_end_to_end() {
             topic_filter: "devices/+/raw".to_string(),
             decoder: DecoderConfig::Utf8,
         }],
+        pipeline: PipelineConfig::default(),
     };
 
     let mut builder = DecoderRegistryBuilder::new();
@@ -464,7 +484,12 @@ async fn websocket_end_to_end() {
     .unwrap();
 
     let pipeline_client = conn.client.clone();
-    tokio::spawn(pipeline::run(conn.incoming, pipeline_client, registry));
+    tokio::spawn(pipeline::run(
+        conn.incoming,
+        pipeline_client,
+        registry,
+        app_config.pipeline.max_concurrent_decodes,
+    ));
 
     // The broker only has a `ws` listener (no `v4`), so the observer client also connects over
     // websocket.
@@ -514,4 +539,149 @@ async fn websocket_end_to_end() {
         .expect("channel closed");
     assert_eq!(topic, "devices/42/raw/decoded");
     assert_eq!(String::from_utf8(payload).unwrap(), "hello over ws");
+}
+
+/// Test-only decoder that tracks how many decodes are running concurrently, via an
+/// `Arc<AtomicUsize>` counter, and the peak value that counter ever reached, via a second
+/// `Arc<AtomicUsize>` shared back with the test. Sleeps for `delay` on every decode using
+/// `tokio::time::sleep` (not `std::thread::sleep` -- `decode` is genuinely async) so that messages
+/// published back-to-back overlap in time, giving concurrently-running decodes a window in which
+/// to actually overlap.
+struct SlowDecoder {
+    in_flight: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+    delay: Duration,
+}
+
+#[async_trait]
+impl Decoder for SlowDecoder {
+    type Error = Infallible;
+
+    fn name(&self) -> &str {
+        "slow"
+    }
+
+    async fn decode(
+        &self,
+        publish: &Publish,
+        tx: Sender<DecodePublish>,
+    ) -> Result<(), DecodeError<Self::Error>> {
+        let current = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(current, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+
+        tx.send(DecodePublish {
+            payload: publish.payload.to_vec(),
+            ..Default::default()
+        })
+        .await?;
+        Ok(())
+    }
+}
+
+/// Proves `max_concurrent_decodes` both bounds *and* enables concurrency: with a decoder slow
+/// enough that back-to-back messages overlap in time, peak concurrent decodes observed across the
+/// run must land at the configured cap -- never above it (the bound), and never at 1 (which would
+/// mean messages were still being handled one at a time despite the cap, i.e. no real parallelism).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bounded_concurrent_decoding() {
+    let broker_config = rumqttd_config(CONCURRENCY_TEST_PORT);
+    std::thread::spawn(move || {
+        let mut broker = rumqttd::Broker::new(broker_config);
+        let _ = broker.start();
+    });
+    wait_for_port(CONCURRENCY_TEST_PORT).await;
+
+    const CAP: usize = 3;
+    const MESSAGE_COUNT: usize = 9;
+    let delay = Duration::from_millis(200);
+
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+
+    let mut builder = DecoderRegistryBuilder::new();
+    builder
+        .register(
+            TopicFilter::parse("load/#").unwrap(),
+            Arc::new(SlowDecoder {
+                in_flight: Arc::clone(&in_flight),
+                peak: Arc::clone(&peak),
+                delay,
+            }),
+        )
+        .unwrap();
+    let registry = builder.build();
+
+    let broker_cfg = BrokerConfig {
+        host: "127.0.0.1".to_string(),
+        port: CONCURRENCY_TEST_PORT,
+        client_id: "rosetta-mq-concurrency-test".to_string(),
+        auth: None,
+        tls: false,
+        protocol: Protocol::Mqtt,
+        allow_self_signed_certs: false,
+    };
+
+    let conn = Client::connect(&broker_cfg, &ResolvedAuth::None).unwrap();
+    Client::subscribe_all(&conn.client, ["load/#"])
+        .await
+        .unwrap();
+
+    let pipeline_client = conn.client.clone();
+    tokio::spawn(pipeline::run(conn.incoming, pipeline_client, registry, CAP));
+
+    let mut options = MqttOptions::new(
+        "test-observer-concurrency",
+        "127.0.0.1",
+        CONCURRENCY_TEST_PORT,
+    );
+    options.set_keep_alive(Duration::from_secs(30));
+    let (test_client, mut test_eventloop) = AsyncClient::new(options, 100);
+
+    let (tx, mut rx) = mpsc::channel(MESSAGE_COUNT);
+    tokio::spawn(async move {
+        loop {
+            match test_eventloop.poll().await {
+                Ok(Event::Incoming(Packet::Publish(_))) => {
+                    if tx.send(()).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    test_client
+        .subscribe("load/+/decoded", QoS::AtLeastOnce)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    for i in 0..MESSAGE_COUNT {
+        test_client
+            .publish(format!("load/{i}"), QoS::AtLeastOnce, false, "x")
+            .await
+            .unwrap();
+    }
+
+    for _ in 0..MESSAGE_COUNT {
+        timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for decoded message")
+            .expect("channel closed");
+    }
+
+    let observed_peak = peak.load(Ordering::SeqCst);
+    assert!(
+        observed_peak <= CAP,
+        "peak concurrent decodes ({observed_peak}) exceeded cap ({CAP})"
+    );
+    assert!(
+        observed_peak > 1,
+        "peak concurrent decodes was {observed_peak} -- messages were processed sequentially, not concurrently"
+    );
 }

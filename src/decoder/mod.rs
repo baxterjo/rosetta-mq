@@ -243,12 +243,12 @@ pub struct DecoderRegistry {
 }
 
 impl DecoderRegistry {
-    pub fn resolve(&self, topic: &str) -> Option<&dyn ErasedDecoder> {
+    pub fn resolve(&self, topic: &str) -> Option<Arc<dyn ErasedDecoder>> {
         self.entries
             .iter()
             .filter(|e| e.filter.matches(topic))
             .max_by_key(|e| &e.filter)
-            .map(|e| e.decoder.as_ref())
+            .map(|e| Arc::clone(&e.decoder))
     }
 }
 

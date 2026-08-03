@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
     .context("subscribing to configured topics")?;
 
     tokio::select! {
-        _ = pipeline::run(conn.incoming, conn.client.clone(), registry) => {}
+        _ = pipeline::run(conn.incoming, conn.client.clone(), registry, config.pipeline.max_concurrent_decodes) => {}
         res = conn.driver => {
             tracing::error!("MQTT client driver returned early: {:?}", res)
         }
