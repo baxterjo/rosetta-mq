@@ -1,11 +1,13 @@
 use std::path::{Path, PathBuf};
 
+use async_trait::async_trait;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, SerializeOptions};
 use rumqttc::Publish;
 use serde::Deserialize;
 use thiserror::Error;
+use tokio::sync::mpsc::Sender;
 
-use crate::decoder::{DecodeError, Decoder};
+use crate::decoder::{DecodeError, DecodePublish, Decoder};
 use crate::util::resolve_path;
 
 /// Per-topic config for the protobuf decoder: which `.proto` file to compile at runtime, which
@@ -30,6 +32,10 @@ pub enum ProtobufDecoderError {
     },
     #[error("failed to build descriptor pool: {0}")]
     Descriptor(#[from] prost_reflect::DescriptorError),
+    #[error("failed to decode protobuf payload against schema: {0}")]
+    Decode(#[from] protox::prost::DecodeError),
+    #[error("Failed to serialize into JSON: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("message type {0:?} not found in compiled schema")]
     UnknownMessageType(String),
 }
@@ -43,7 +49,6 @@ pub enum ProtobufDecoderError {
 /// unknown fields and are invisible in the JSON output below.
 #[derive(Debug)]
 pub struct ProtobufDecoder {
-    message_type: String,
     descriptor: MessageDescriptor,
 }
 
@@ -75,26 +80,25 @@ impl ProtobufDecoder {
             .get_message_by_name(&cfg.message_type)
             .ok_or_else(|| ProtobufDecoderError::UnknownMessageType(cfg.message_type.clone()))?;
 
-        Ok(Self {
-            message_type: cfg.message_type.clone(),
-            descriptor,
-        })
+        Ok(Self { descriptor })
     }
 }
 
+#[async_trait]
 impl Decoder for ProtobufDecoder {
+    type Error = ProtobufDecoderError;
+
     fn name(&self) -> &str {
         "protobuf"
     }
 
-    fn decode(&self, publish: &Publish) -> Result<String, DecodeError> {
+    async fn decode(
+        &self,
+        publish: &Publish,
+        tx: Sender<DecodePublish>,
+    ) -> Result<(), DecodeError<Self::Error>> {
         let message = DynamicMessage::decode(self.descriptor.clone(), publish.payload.clone())
-            .map_err(|e| {
-                DecodeError::Message(format!(
-                    "protobuf decode failed for message type {:?}: {e}",
-                    self.message_type
-                ))
-            })?;
+            .map_err(|e| DecodeError::Decode(e.into()))?;
 
         // `use_proto_field_name(true)` so JSON keys match the .proto source (snake_case) the
         // user wrote, rather than prost-reflect's default lowerCamelCase -- this is a debugging
@@ -106,11 +110,15 @@ impl Decoder for ProtobufDecoder {
                 &mut serializer,
                 &SerializeOptions::new().use_proto_field_name(true),
             )
-            .map_err(|e| {
-                DecodeError::Message(format!("failed to serialize decoded message as JSON: {e}"))
-            })?;
+            .map_err(|e| DecodeError::Decode(e.into()))?;
 
-        Ok(String::from_utf8(buf).expect("serde_json output is valid UTF-8"))
+        tx.send(DecodePublish {
+            payload: buf,
+            ..Default::default()
+        })
+        .await?;
+
+        Ok(())
     }
 }
 
@@ -119,6 +127,7 @@ mod tests {
     use prost::Message as _;
     use prost_reflect::Value;
     use rumqttc::QoS;
+    use tokio::sync::mpsc;
 
     use super::*;
 
@@ -139,8 +148,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn decodes_valid_wire_bytes_to_json() {
+    #[tokio::test]
+    async fn decodes_valid_wire_bytes_to_json() {
         let decoder = ProtobufDecoder::from_config(&test_config(), Path::new(".")).unwrap();
 
         let mut message = DynamicMessage::new(decoder.descriptor.clone());
@@ -154,9 +163,11 @@ mod tests {
         let bytes = message.encode_to_vec();
 
         let publish = Publish::new("devices/42/raw", QoS::AtLeastOnce, bytes);
-        let json = decoder.decode(&publish).unwrap();
+        let (tx, mut rx) = mpsc::channel(1);
+        decoder.decode(&publish, tx).await.unwrap();
+        let decoded = rx.recv().await.unwrap();
 
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&decoded.payload).unwrap();
         assert_eq!(value["device_id"], "sensor-42");
         assert_eq!(value["temperature_c"], 21.5);
         assert_eq!(value["online"], true);
@@ -215,10 +226,11 @@ mod tests {
         assert!(matches!(err, ProtobufDecoderError::UnknownMessageType(_)));
     }
 
-    #[test]
-    fn decode_fails_on_malformed_wire_bytes() {
+    #[tokio::test]
+    async fn decode_fails_on_malformed_wire_bytes() {
         let decoder = ProtobufDecoder::from_config(&test_config(), Path::new(".")).unwrap();
         let publish = Publish::new("devices/42/raw", QoS::AtLeastOnce, vec![0xff, 0xff, 0xff]);
-        assert!(decoder.decode(&publish).is_err());
+        let (tx, _rx) = mpsc::channel(1);
+        assert!(decoder.decode(&publish, tx).await.is_err());
     }
 }

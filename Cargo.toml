@@ -49,6 +49,7 @@ tracing-subscriber = { version = "0.3", features = [
   "env-filter",
 ], optional = true }
 anyhow = { version = "1", optional = true }
+async-trait = "0.1.91"
 
 [dev-dependencies]
 rumqttd = { version = "0.19", features = ["verify-client-cert"] }

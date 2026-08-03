@@ -1,28 +1,156 @@
-use std::path::Path;
 use std::sync::Arc;
+use std::{error::Error, path::Path};
 
-use rumqttc::Publish;
+use rumqttc::{AsyncClient, ClientError, Publish, QoS};
 use serde::Deserialize;
 use thiserror::Error;
 
 use crate::topic::TopicFilter;
+use async_trait::async_trait;
+use tokio::sync::mpsc::{error::SendError, Sender};
 
 pub mod builtin;
 pub mod protobuf;
 
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum DecodeError {
-    #[error("{0}")]
-    Message(String),
+#[derive(Debug, Error)]
+pub enum DecodeError<E: Error> {
+    #[error(transparent)]
+    Chanel(#[from] SendError<DecodePublish>),
+    #[error(transparent)]
+    Decode(E),
+}
+
+impl<E: Error> DecodeError<E> {
+    fn map_decode<F: Error>(self, f: impl FnOnce(E) -> F) -> DecodeError<F> {
+        match self {
+            DecodeError::Chanel(e) => DecodeError::Chanel(e),
+            DecodeError::Decode(e) => DecodeError::Decode(f(e)),
+        }
+    }
+}
+
+impl<E: Error + Send + Sync + 'static> DecodeError<E> {
+    /// Boxes the decoder-specific error so it can travel through a type-erased [`Decoder`]
+    /// trait object, which can't carry `Self::Error` as-is.
+    fn erase(self) -> DecodeError<BoxedDecodeError> {
+        self.map_decode(|e| BoxedDecodeError(Box::new(e)))
+    }
+}
+
+/// Type-erased decoder error, used at the [`Decoder`] trait-object boundary in place of the
+/// concrete `Self::Error` a specific decoder impl would otherwise carry. `Box<dyn Error>` doesn't
+/// implement `Error` itself (only `Box<E: Error>` does), so this newtype forwards `Display` and
+/// `source()` by hand.
+#[derive(Debug)]
+pub struct BoxedDecodeError(Box<dyn Error + Send + Sync>);
+
+impl std::fmt::Display for BoxedDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl Error for BoxedDecodeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.0.source()
+    }
+}
+
+/// Decoders will emit this to a channel whenever they want to publish a new message.
+///
+/// Many decoders will only emit one of these, but some may emit a stream.
+///
+/// The optional fields will be resolved
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DecodePublish {
+    pub topic: Option<String>,
+    pub qos: Option<QoS>,
+    pub retain: Option<bool>,
+    pub payload: Vec<u8>,
+}
+
+impl DecodePublish {
+    /// Resolves missing publish arguments using the values already present in `incoming` and
+    /// publishes using `client`.
+    pub async fn publish(self, incoming: Publish, client: &AsyncClient) -> Result<(), ClientError> {
+        self.resolve(incoming).publish(client).await
+    }
+
+    fn resolve(self, incoming: Publish) -> ResolvedDecodePublish {
+        ResolvedDecodePublish {
+            topic: self.topic.unwrap_or(format!("{}/decoded", incoming.topic)),
+            qos: self.qos.unwrap_or(incoming.qos),
+            retain: self.retain.unwrap_or(incoming.retain),
+            payload: self.payload.into(),
+        }
+    }
+}
+
+pub struct ResolvedDecodePublish {
+    pub topic: String,
+    pub qos: QoS,
+    pub retain: bool,
+    pub payload: Vec<u8>,
+}
+
+impl ResolvedDecodePublish {
+    async fn publish(self, client: &AsyncClient) -> Result<(), ClientError> {
+        client
+            .publish(self.topic, self.qos, self.retain, self.payload)
+            .await
+    }
 }
 
 /// Decodes an incoming MQTT publish into a human-readable string. Implementations get the whole
 /// [`Publish`] packet (topic, QoS, retain, payload, ...), not just the payload bytes, since some
 /// decoders may need more than the raw payload to decode correctly. Implementations should be
 /// cheap to share across messages (registered once, invoked per message).
-pub trait Decoder: Send + Sync {
+#[async_trait]
+pub trait Decoder {
+    /// Error emitted if decoder fails to decode the message.
+    type Error: Error;
+    /// Name of the decoder.
     fn name(&self) -> &str;
-    fn decode(&self, publish: &Publish) -> Result<String, DecodeError>;
+    /// Decode the incoming publish message.
+    async fn decode(
+        &self,
+        publish: &Publish,
+        tx: Sender<DecodePublish>,
+    ) -> Result<(), DecodeError<Self::Error>>;
+}
+
+/// Object-safe counterpart to [`Decoder`], used everywhere a decoder needs to be stored or
+/// passed as `dyn` (e.g. the registry below). `Decoder` itself can't be made into a trait object
+/// because `Self::Error` varies per implementation; this trait erases that error into
+/// [`BoxedDecodeError`] instead. Implemented for every `Decoder` via the blanket impl below --
+/// decoder authors implement `Decoder`, never this trait directly.
+#[async_trait]
+pub trait ErasedDecoder: Send + Sync {
+    fn name(&self) -> &str;
+    async fn decode(
+        &self,
+        publish: &Publish,
+        tx: Sender<DecodePublish>,
+    ) -> Result<(), DecodeError<BoxedDecodeError>>;
+}
+
+#[async_trait]
+impl<T> ErasedDecoder for T
+where
+    T: Decoder + Send + Sync,
+    T::Error: Send + Sync + 'static,
+{
+    fn name(&self) -> &str {
+        Decoder::name(self)
+    }
+
+    async fn decode(
+        &self,
+        publish: &Publish,
+        tx: Sender<DecodePublish>,
+    ) -> Result<(), DecodeError<BoxedDecodeError>> {
+        Decoder::decode(self, publish, tx).await.map_err(DecodeError::erase)
+    }
 }
 
 /// Per-topic decoder configuration, discriminated by the `decoder` field in TOML (e.g.
@@ -46,7 +174,7 @@ impl DecoderConfig {
     /// decoders (e.g. compiling a `.proto` file), so this runs once at registry-build time, not
     /// per message. `base_dir` resolves any relative paths in decoder-specific config (e.g.
     /// `proto_file`) against the config file's directory rather than the process's CWD.
-    pub fn build(&self, base_dir: &Path) -> Result<Arc<dyn Decoder>, BuildDecoderError> {
+    pub fn build(&self, base_dir: &Path) -> Result<Arc<dyn ErasedDecoder>, BuildDecoderError> {
         match self {
             DecoderConfig::Hexdump => Ok(Arc::new(builtin::HexDumpDecoder)),
             DecoderConfig::Utf8 => Ok(Arc::new(builtin::Utf8Decoder)),
@@ -71,7 +199,7 @@ pub enum RegistryError {
 
 struct RegistryEntry {
     filter: TopicFilter,
-    decoder: Arc<dyn Decoder>,
+    decoder: Arc<dyn ErasedDecoder>,
 }
 
 /// Builds a [`DecoderRegistry`] by registering one decoder per topic filter.
@@ -88,7 +216,7 @@ impl DecoderRegistryBuilder {
     pub fn register(
         &mut self,
         filter: TopicFilter,
-        decoder: Arc<dyn Decoder>,
+        decoder: Arc<dyn ErasedDecoder>,
     ) -> Result<(), RegistryError> {
         if self
             .entries
@@ -115,7 +243,7 @@ pub struct DecoderRegistry {
 }
 
 impl DecoderRegistry {
-    pub fn resolve(&self, topic: &str) -> Option<&dyn Decoder> {
+    pub fn resolve(&self, topic: &str) -> Option<&dyn ErasedDecoder> {
         self.entries
             .iter()
             .filter(|e| e.filter.matches(topic))
