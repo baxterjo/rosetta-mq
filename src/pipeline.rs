@@ -1,9 +1,12 @@
 use std::ops::ControlFlow;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rumqttc::{AsyncClient, Publish};
 use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinSet};
+use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 use crate::decoder::{DecodePublish, DecoderRegistry, ErasedDecoder};
 
@@ -11,6 +14,11 @@ use crate::decoder::{DecodePublish, DecoderRegistry, ErasedDecoder};
 /// growing memory unbounded; small since decoded messages are drained concurrently with decode
 /// (see `decode_and_publish` below), not buffered up-front.
 const DECODE_CHANNEL_CAPACITY: usize = 8;
+
+/// How long shutdown waits for in-flight decode/publish tasks to finish on their own before
+/// abandoning whatever's left -- so a user hitting Ctrl+C isn't stuck waiting on a decode that's
+/// hung (e.g. a wedged child process).
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Decode/republish loop: for each incoming message, resolves a decoder for its topic and spawns
 /// a task that drains whatever it publishes to `{topic}/decoded` (a decoder may emit zero, one,
@@ -22,11 +30,16 @@ const DECODE_CHANNEL_CAPACITY: usize = 8;
 /// Up to `max_concurrent_decodes` messages are decoded and republished concurrently, so a slow or
 /// long-streaming decode doesn't stall messages behind it. Once that many are in flight, intake
 /// pauses until one finishes.
+///
+/// Cancelling `shutdown` stops intake immediately and gives outstanding tasks up to
+/// `SHUTDOWN_DRAIN_TIMEOUT` to finish before `run` returns, rather than the caller simply dropping
+/// this future (which would abort every in-flight decode/publish mid-flight).
 pub async fn run(
     mut incoming: mpsc::Receiver<Publish>,
     client: AsyncClient,
     registry: DecoderRegistry,
     max_concurrent_decodes: usize,
+    shutdown: CancellationToken,
 ) {
     let mut tasks = JoinSet::new();
 
@@ -40,18 +53,35 @@ pub async fn run(
                     break;
                 }
             }
-            // Reaps opportunistically -- as soon as any task finishes, not only once the set is
-            // full -- so a panic surfaces immediately and finished tasks don't linger in `tasks`
-            // under light load.
+            // Reaps completed tasks.
             Some(result) = tasks.join_next(), if !tasks.is_empty() => {
                 reap(result);
+            }
+            () = shutdown.cancelled() => {
+                break;
             }
         }
     }
 
-    // `incoming` is closed at this point (the `recv` arm's `None` case is the only `break`), so
-    // drain outstanding tasks before returning rather than dropping in-flight decodes.
-    while tasks.join_next().await.is_some() {}
+    // The loop above ends for one of two reasons: `incoming` closed, or `shutdown` was
+    // cancelled. Either way, give outstanding tasks a bounded window to finish on their own
+    // before abandoning them -- `tasks` aborts anything still running when it's dropped at the
+    // end of this function.
+    if timeout(SHUTDOWN_DRAIN_TIMEOUT, drain(&mut tasks))
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            remaining = tasks.len(),
+            "timed out waiting for in-flight decode tasks to finish; abandoning the rest"
+        );
+    }
+}
+
+async fn drain(tasks: &mut JoinSet<()>) {
+    while let Some(result) = tasks.join_next().await {
+        reap(result);
+    }
 }
 
 /// Handles one item off `incoming`: `Break` means the channel closed and `run`'s loop should

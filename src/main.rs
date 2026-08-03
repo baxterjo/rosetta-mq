@@ -7,6 +7,7 @@ use rosetta_mq::config::Config;
 use rosetta_mq::decoder::DecoderRegistryBuilder;
 use rosetta_mq::pipeline;
 use rosetta_mq::topic::TopicFilter;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
 #[command(name = "rosetta-mq")]
@@ -63,14 +64,29 @@ async fn main() -> anyhow::Result<()> {
     .await
     .context("subscribing to configured topics")?;
 
+    let shutdown = CancellationToken::new();
+    let pipeline_handle = tokio::spawn(pipeline::run(
+        conn.incoming,
+        conn.client.clone(),
+        registry,
+        config.pipeline.max_concurrent_decodes,
+        shutdown.clone(),
+    ));
+
     tokio::select! {
-        _ = pipeline::run(conn.incoming, conn.client.clone(), registry, config.pipeline.max_concurrent_decodes) => {}
         res = conn.driver => {
-            tracing::error!("MQTT client driver returned early: {:?}", res)
+            tracing::error!("MQTT client driver returned early: {:?}", res);
         }
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("shutting down");
         }
+    }
+
+    // Signals `pipeline::run` to stop taking new messages and drain in-flight ones (bounded by
+    // its own internal timeout) rather than aborting them mid-flight by dropping its task.
+    shutdown.cancel();
+    if let Err(err) = pipeline_handle.await {
+        tracing::error!(error = %err, "pipeline task panicked");
     }
 
     Ok(())

@@ -21,11 +21,13 @@ use rosetta_mq::decoder::{
 use rosetta_mq::pipeline;
 use rosetta_mq::protocol::{Protocol, WebsocketConfig};
 use rosetta_mq::topic::TopicFilter;
+use tokio_util::sync::CancellationToken;
 
 const TEST_PORT: u16 = 18883;
 const PROTOBUF_TEST_PORT: u16 = 18884;
 const WEBSOCKET_TEST_PORT: u16 = 18888;
 const CONCURRENCY_TEST_PORT: u16 = 18889;
+const SHUTDOWN_TEST_PORT: u16 = 18890;
 const PROTO_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/protobuf/device.proto"
@@ -195,6 +197,7 @@ async fn subscribe_decode_republish_end_to_end() {
         pipeline_client,
         registry,
         app_config.pipeline.max_concurrent_decodes,
+        CancellationToken::new(),
     ));
 
     // 3. A second, independent rumqttc client plays the role of "any existing MQTT client"
@@ -368,6 +371,7 @@ async fn protobuf_decoder_end_to_end() {
         pipeline_client,
         registry,
         app_config.pipeline.max_concurrent_decodes,
+        CancellationToken::new(),
     ));
 
     let mut options = MqttOptions::new("test-observer-protobuf", "127.0.0.1", PROTOBUF_TEST_PORT);
@@ -489,6 +493,7 @@ async fn websocket_end_to_end() {
         pipeline_client,
         registry,
         app_config.pipeline.max_concurrent_decodes,
+        CancellationToken::new(),
     ));
 
     // The broker only has a `ws` listener (no `v4`), so the observer client also connects over
@@ -629,7 +634,13 @@ async fn bounded_concurrent_decoding() {
         .unwrap();
 
     let pipeline_client = conn.client.clone();
-    tokio::spawn(pipeline::run(conn.incoming, pipeline_client, registry, CAP));
+    tokio::spawn(pipeline::run(
+        conn.incoming,
+        pipeline_client,
+        registry,
+        CAP,
+        CancellationToken::new(),
+    ));
 
     let mut options = MqttOptions::new(
         "test-observer-concurrency",
@@ -684,4 +695,108 @@ async fn bounded_concurrent_decoding() {
         observed_peak > 1,
         "peak concurrent decodes was {observed_peak} -- messages were processed sequentially, not concurrently"
     );
+}
+
+/// Proves cancellation is a graceful shutdown, not an abort: an in-flight decode/publish must
+/// still complete and be republished after `shutdown.cancel()`, and `pipeline::run` must return
+/// once that happens rather than sitting out its full drain timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graceful_shutdown_drains_in_flight_task_before_returning() {
+    let broker_config = rumqttd_config(SHUTDOWN_TEST_PORT);
+    std::thread::spawn(move || {
+        let mut broker = rumqttd::Broker::new(broker_config);
+        let _ = broker.start();
+    });
+    wait_for_port(SHUTDOWN_TEST_PORT).await;
+
+    // Long enough that the decode is still running when we cancel a moment after publishing, but
+    // well under both the 2s we allow `run` to return by and the 5s abandon timeout -- so a
+    // passing test proves the in-flight task was drained, not that it got lucky beating the clock.
+    let decode_delay = Duration::from_millis(300);
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+
+    let mut builder = DecoderRegistryBuilder::new();
+    builder
+        .register(
+            TopicFilter::parse("shutdown/#").unwrap(),
+            Arc::new(SlowDecoder {
+                in_flight,
+                peak,
+                delay: decode_delay,
+            }),
+        )
+        .unwrap();
+    let registry = builder.build();
+
+    let broker_cfg = BrokerConfig {
+        host: "127.0.0.1".to_string(),
+        port: SHUTDOWN_TEST_PORT,
+        client_id: "rosetta-mq-shutdown-test".to_string(),
+        auth: None,
+        tls: false,
+        protocol: Protocol::Mqtt,
+        allow_self_signed_certs: false,
+    };
+
+    let conn = Client::connect(&broker_cfg, &ResolvedAuth::None).unwrap();
+    Client::subscribe_all(&conn.client, ["shutdown/#"])
+        .await
+        .unwrap();
+
+    let pipeline_client = conn.client.clone();
+    let shutdown = CancellationToken::new();
+    let pipeline_handle = tokio::spawn(pipeline::run(
+        conn.incoming,
+        pipeline_client,
+        registry,
+        10,
+        shutdown.clone(),
+    ));
+
+    let mut options = MqttOptions::new("test-observer-shutdown", "127.0.0.1", SHUTDOWN_TEST_PORT);
+    options.set_keep_alive(Duration::from_secs(30));
+    let (test_client, mut test_eventloop) = AsyncClient::new(options, 100);
+
+    let (tx, mut rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        loop {
+            match test_eventloop.poll().await {
+                Ok(Event::Incoming(Packet::Publish(publish))) => {
+                    if tx.send(publish.topic).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    test_client
+        .subscribe("shutdown/1/decoded", QoS::AtLeastOnce)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    test_client
+        .publish("shutdown/1", QoS::AtLeastOnce, false, "x")
+        .await
+        .unwrap();
+    // Give the decode a moment to actually start, so it's genuinely in-flight when cancelled --
+    // not just still sitting in `incoming`.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    shutdown.cancel();
+
+    timeout(Duration::from_secs(2), pipeline_handle)
+        .await
+        .expect("pipeline::run did not return promptly after cancellation")
+        .expect("pipeline task panicked");
+
+    let topic = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("decoded message was dropped instead of drained on shutdown")
+        .expect("channel closed");
+    assert_eq!(topic, "shutdown/1/decoded");
 }
