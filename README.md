@@ -140,6 +140,20 @@ For `"protobuf"`:
   file's directory. `proto_file`'s own directory is always searched; this is
   only needed for imports that live elsewhere.
 
+### `[pipeline]`
+
+```toml
+[pipeline]
+# Optional; defaults to 100. Maximum number of incoming messages decoded and
+# republished concurrently. Once this many are in flight, the pipeline stops
+# pulling new messages until one finishes.
+max_concurrent_decodes = 100
+```
+
+| Field                    | Description                                                        |
+|--------------------------|----------------------------------------------------------------------|
+| `max_concurrent_decodes` | Optional, defaults to `100`. Must be at least `1`. Caps how many messages are decoded and republished concurrently. |
+
 ## Usage
 
 ```sh
