@@ -15,6 +15,7 @@ use rosetta_mq::auth::ResolvedAuth;
 use rosetta_mq::client::Client;
 use rosetta_mq::config::{BrokerConfig, Config, PipelineConfig, TopicMapping};
 use rosetta_mq::decoder::protobuf::ProtobufConfig;
+use rosetta_mq::decoder::template::TemplateConfig;
 use rosetta_mq::decoder::{
     DecodeError, DecodePublish, Decoder, DecoderConfig, DecoderRegistryBuilder,
 };
@@ -28,6 +29,7 @@ const PROTOBUF_TEST_PORT: u16 = 18884;
 const WEBSOCKET_TEST_PORT: u16 = 18888;
 const CONCURRENCY_TEST_PORT: u16 = 18889;
 const SHUTDOWN_TEST_PORT: u16 = 18890;
+const TEMPLATE_TEST_PORT: u16 = 18891;
 const PROTO_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/protobuf/device.proto"
@@ -437,6 +439,109 @@ async fn protobuf_decoder_end_to_end() {
     assert_eq!(json["temperature_c"], 21.5);
     assert_eq!(json["online"], true);
     assert_eq!(json["status"], "CONNECTION_STATUS_ONLINE");
+}
+
+#[tokio::test]
+async fn template_decoder_end_to_end() {
+    let broker_config = rumqttd_config(TEMPLATE_TEST_PORT);
+    std::thread::spawn(move || {
+        let mut broker = rumqttd::Broker::new(broker_config);
+        let _ = broker.start();
+    });
+    wait_for_port(TEMPLATE_TEST_PORT).await;
+
+    let app_config = Config {
+        broker: BrokerConfig {
+            host: "127.0.0.1".to_string(),
+            port: TEMPLATE_TEST_PORT,
+            client_id: "rosetta-mq-template-test".to_string(),
+            auth: None,
+            tls: false,
+            protocol: Protocol::Mqtt,
+            allow_self_signed_certs: false,
+        },
+        topics: vec![TopicMapping {
+            topic_filter: "devices/+/raw".to_string(),
+            decoder: DecoderConfig::Template(TemplateConfig {
+                template: "{{ payload.device_id }} reads {{ payload.temperature_c }}C on {{ topic }}"
+                    .to_string(),
+                ..Default::default()
+            }),
+        }],
+        pipeline: PipelineConfig::default(),
+    };
+
+    let mut builder = DecoderRegistryBuilder::new();
+    for mapping in &app_config.topics {
+        let decoder = mapping.decoder.build(Path::new(".")).unwrap();
+        let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
+        builder.register(filter, decoder).unwrap();
+    }
+    let registry = builder.build();
+
+    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None).unwrap();
+    Client::subscribe_all(
+        &conn.client,
+        app_config.topics.iter().map(|t| t.topic_filter.as_str()),
+    )
+    .await
+    .unwrap();
+
+    let pipeline_client = conn.client.clone();
+    tokio::spawn(pipeline::run(
+        conn.incoming,
+        pipeline_client,
+        registry,
+        app_config.pipeline.max_concurrent_decodes,
+        CancellationToken::new(),
+    ));
+
+    let mut options = MqttOptions::new("test-observer-template", "127.0.0.1", TEMPLATE_TEST_PORT);
+    options.set_keep_alive(Duration::from_secs(30));
+    let (test_client, mut test_eventloop) = AsyncClient::new(options, 100);
+
+    let (tx, mut rx) = mpsc::channel(10);
+    tokio::spawn(async move {
+        loop {
+            match test_eventloop.poll().await {
+                Ok(Event::Incoming(Packet::Publish(publish))) => {
+                    if tx
+                        .send((publish.topic, publish.payload.to_vec()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    test_client
+        .subscribe("devices/42/raw/decoded", QoS::AtLeastOnce)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    test_client
+        .publish(
+            "devices/42/raw",
+            QoS::AtLeastOnce,
+            false,
+            br#"{"device_id": "sensor-42", "temperature_c": 21.5}"#.to_vec(),
+        )
+        .await
+        .unwrap();
+
+    let (topic, payload) = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for decoded template message")
+        .expect("channel closed");
+    assert_eq!(topic, "devices/42/raw/decoded");
+    assert_eq!(payload, b"sensor-42 reads 21.5C on devices/42/raw");
 }
 
 /// Proves the websocket transport carries real traffic end-to-end -- same embedded-broker shape

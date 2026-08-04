@@ -51,6 +51,13 @@ message_type = "device.v1.DeviceReading"
 # Only needed if device.proto imports another .proto that isn't a sibling of
 # proto_file itself -- extra directories to search when resolving imports.
 include_paths = ["schemas/common"]
+
+[[topic]]
+topic_filter = "devices/+/json"
+decoder = "template"
+template = """
+{{ topic }}: {{ payload.device_id }} is {{ payload.temperature_c }}C
+"""
 ```
 
 ### `[broker]`
@@ -129,6 +136,7 @@ Built-in decoders:
 | `"utf8"`     | —                                                                              | Decodes the payload as UTF-8 text. (Mostly used for testing)                |
 | `"hexdump"`  | —                                                                              | Renders the raw payload bytes as hex.             |
 | `"protobuf"` | `proto_file`, `message_type`, `include_paths` (optional)                     | Decodes a Protobuf payload to JSON using a schema.|
+| `"template"` | `template`, `undefined_behavior` (optional)                                   | Renders the message through a user-authored Jinja2-compatible template.|
 
 For `"protobuf"`:
 - `proto_file` — path to the `.proto` file defining the message, resolved
@@ -139,6 +147,30 @@ For `"protobuf"`:
   resolving `import`s in the schema, also resolved relative to the config
   file's directory. `proto_file`'s own directory is always searched; this is
   only needed for imports that live elsewhere.
+
+For `"template"`:
+- `template` — the template text itself, written inline in the config
+  (typically as a TOML triple-quoted string). Syntax is Jinja2-compatible,
+  via the [`minijinja`](https://docs.rs/minijinja) engine.
+- The template has access to every field of the incoming MQTT packet:
+  `topic`, `qos`, `retain`, `dup`, and `pkid`.
+- `payload` is also available and adapts to the payload's content: if it's
+  valid JSON, `payload` is the parsed value and can be indexed
+  (`{{ payload.device_id }}`, `{{ payload[0] }}`, ...); if it's valid UTF-8
+  text but not JSON, `payload` is that text as a plain string; otherwise
+  `payload` is the raw bytes hex-encoded as a string.
+- `undefined_behavior` — optional, defaults to `"strict"`. Controls what
+  happens when a template references something undefined — a missing JSON
+  key, indexing into a payload that isn't JSON, a typo'd variable name. Where
+  the table below says "decode failure", that's treated like any other
+  decode failure: republished (to `.../decode_error`, with the render error
+  and the raw payload as hex) rather than silently dropped.
+  | Value              | Behavior                                                            |
+  |--------------------|----------------------------------------------------------------------|
+  | `"strict"`         | Any use of an undefined value (printing, iterating, attribute access, truthiness) is a decode failure. |
+  | `"semi_strict"`    | Like `"strict"`, but checking an undefined value for truthiness (e.g. `{% if maybe_field %}`) is allowed instead of failing. |
+  | `"chainable"`      | Attribute access on an undefined value returns another undefined value instead of failing, so a chain like `{{ payload.a.b }}` fails only when printed/iterated, not at the first missing link. |
+  | `"lenient"`        | Undefined values print as an empty string and iterate as empty — matches Jinja2's own default behavior. |
 
 ### `[pipeline]`
 

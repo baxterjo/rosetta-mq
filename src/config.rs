@@ -179,6 +179,88 @@ mod tests {
     }
 
     #[test]
+    fn parses_template_mapping_with_multiline_toml_string() {
+        let config = Config::parse(
+            r#"
+            [broker]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+            tls = false
+
+            [[topic]]
+            topic_filter = "devices/+/raw"
+            decoder = "template"
+            template = """
+            topic: {{ topic }}
+            device: {{ payload.device_id }}
+            """
+        "#,
+        )
+        .unwrap();
+
+        match &config.topics[0].decoder {
+            DecoderConfig::Template(cfg) => {
+                assert!(cfg.template.contains("topic: {{ topic }}"));
+                assert!(cfg.template.contains("device: {{ payload.device_id }}"));
+                assert!(matches!(
+                    cfg.undefined_behavior,
+                    crate::decoder::template::UndefinedBehavior::Strict
+                ));
+            }
+            other => panic!("expected template decoder config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_template_mapping_undefined_behavior_override() {
+        let config = Config::parse(
+            r#"
+            [broker]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+            tls = false
+
+            [[topic]]
+            topic_filter = "devices/+/raw"
+            decoder = "template"
+            template = "{{ topic }}"
+            undefined_behavior = "lenient"
+        "#,
+        )
+        .unwrap();
+
+        match &config.topics[0].decoder {
+            DecoderConfig::Template(cfg) => {
+                assert!(matches!(
+                    cfg.undefined_behavior,
+                    crate::decoder::template::UndefinedBehavior::Lenient
+                ));
+            }
+            other => panic!("expected template decoder config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_template_mapping_missing_required_field() {
+        let err = Config::parse(
+            r#"
+            [broker]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+            tls = false
+
+            [[topic]]
+            topic_filter = "devices/+/raw"
+            decoder = "template"
+        "#,
+        );
+        assert!(matches!(err, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
     fn rejects_protobuf_mapping_missing_required_field() {
         let err = Config::parse(
             r#"
