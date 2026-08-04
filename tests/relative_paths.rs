@@ -35,7 +35,7 @@ fn relative_proto_file_resolves_against_config_directory_not_process_cwd() {
     std::fs::write(
         &config_path,
         r#"
-        [broker]
+        [connection]
         host = "127.0.0.1"
         port = 1883
         client_id = "rosetta-mq"

@@ -7,8 +7,7 @@ use rumqttc::QoS;
 use tokio::time::timeout;
 
 use rosetta_mq::auth::{AuthConfig, MtlsConfig, PasswordSource, UserPassConfig};
-use rosetta_mq::client::Client;
-use rosetta_mq::config::BrokerConfig;
+use rosetta_mq::client::{Client, ConnectionConfig};
 use rosetta_mq::protocol::Protocol;
 
 const MTLS_TEST_PORT: u16 = 18885;
@@ -118,7 +117,7 @@ async fn mtls_auth_connects_and_round_trips() {
     });
     wait_for_port(MTLS_TEST_PORT).await;
 
-    let broker = BrokerConfig {
+    let broker = ConnectionConfig {
         host: "127.0.0.1".to_string(),
         port: MTLS_TEST_PORT,
         client_id: "rosetta-mq-mtls-test".to_string(),
@@ -155,7 +154,7 @@ async fn userpass_auth_connects_and_round_trips() {
     });
     wait_for_port(USERPASS_TEST_PORT).await;
 
-    let broker = BrokerConfig {
+    let broker = ConnectionConfig {
         host: "127.0.0.1".to_string(),
         port: USERPASS_TEST_PORT,
         client_id: "rosetta-mq-userpass-test".to_string(),
@@ -204,7 +203,7 @@ async fn self_signed_cert_connects_with_allow_self_signed_certs() {
     });
     wait_for_port(SELF_SIGNED_TEST_PORT).await;
 
-    let broker = BrokerConfig {
+    let broker = ConnectionConfig {
         host: "127.0.0.1".to_string(),
         port: SELF_SIGNED_TEST_PORT,
         client_id: "rosetta-mq-self-signed-test".to_string(),

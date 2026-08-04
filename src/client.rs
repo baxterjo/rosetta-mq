@@ -2,22 +2,53 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rumqttc::tokio_rustls::rustls::{
-    self,
+    self, ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
-    ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
 };
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, Publish, QoS, TlsConfiguration, Transport};
+use serde::Deserialize;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::auth::ResolvedAuth;
-use crate::config::BrokerConfig;
+use crate::auth::{AuthConfig, ResolvedAuth};
 use crate::protocol::Protocol;
 
+//  _____ ____  _   _ ______ _____ _____
+// / ____/ __ \| \ | |  ____|_   _/ ____|
+//| |   | |  | |  \| | |__    | || |  __
+//| |   | |  | | . ` |  __|   | || | |_ |
+//| |___| |__| | |\  | |     _| || |__| |
+// \_____\____/|_| \_|_|    |_____\_____|
+
+#[derive(Debug, Deserialize)]
+pub struct ConnectionConfig {
+    pub host: String,
+    pub port: u16,
+    pub client_id: String,
+    pub auth: Option<AuthConfig>,
+    /// Use TLS (or WSS when using websockets)
+    pub tls: bool,
+    /// Which protocol carries the connection. Defaults to `mqtt` (plain TCP) when omitted.
+    #[serde(flatten, default)]
+    pub protocol: Protocol,
+    /// When `tls` is set, accept the broker's certificate without any verification (no root
+    /// store, no hostname check) -- for self-hosted/dev brokers using a self-signed cert where
+    /// distributing a CA file isn't practical. Has no effect when `tls` is `false`.
+    #[serde(default)]
+    pub allow_self_signed_certs: bool,
+}
+
+// ______ _____  _____   ____  _____   _____
+//|  ____|  __ \|  __ \ / __ \|  __ \ / ____|
+//| |__  | |__) | |__) | |  | | |__) | (___
+//|  __| |  _  /|  _  /| |  | |  _  / \___ \
+//| |____| | \ \| | \ \| |__| | | \ \ ____) |
+//|______|_|  \_\_|  \_\\____/|_|  \_\_____/
+
 #[derive(Debug, Error)]
-pub enum BrokerError {
+pub enum ConnectionError {
     #[error("mqtt connection error: {0}")]
     Connection(#[from] rumqttc::ConnectionError),
 }
@@ -38,6 +69,77 @@ pub enum ClientInitError {
     InvalidClientCert(#[from] rustls::Error),
 }
 
+//  _____ ____  _   _ _   _ ______ _____ _______ _____ ____  _   _
+// / ____/ __ \| \ | | \ | |  ____/ ____|__   __|_   _/ __ \| \ | |
+//| |   | |  | |  \| |  \| | |__ | |       | |    | || |  | |  \| |
+//| |   | |  | | . ` | . ` |  __|| |       | |    | || |  | | . ` |
+//| |___| |__| | |\  | |\  | |___| |____   | |   _| || |__| | |\  |
+// \_____\____/|_| \_|_| \_|______\_____|  |_|  |_____\____/|_| \_|
+
+/// A live connection to an MQTT broker: a client handle for publishing/subscribing, a channel of
+/// incoming messages, and the background task driving the underlying connection.
+pub struct MqttConnection {
+    pub client: AsyncClient,
+    pub incoming: mpsc::Receiver<Publish>,
+    pub driver: JoinHandle<Result<(), ConnectionError>>,
+}
+
+pub struct Client;
+
+impl Client {
+    /// Connects to the configured broker and spawns a background task that continuously polls
+    /// the connection (required to keep it alive and drive publish acks), forwarding incoming
+    /// Publish packets onto a channel.
+    pub fn connect(
+        config: &ConnectionConfig,
+        auth: &ResolvedAuth,
+    ) -> Result<MqttConnection, ClientInitError> {
+        let options = build_options(config, auth)?;
+
+        let (client, mut eventloop) = AsyncClient::new(options, 100);
+        let (tx, rx) = mpsc::channel(100);
+
+        let driver = tokio::spawn(async move {
+            loop {
+                match eventloop.poll().await {
+                    Ok(Event::Incoming(Packet::Publish(publish))) => {
+                        if tx.send(publish).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => return Err(ConnectionError::Connection(e)),
+                }
+            }
+            Ok(())
+        });
+
+        Ok(MqttConnection {
+            client,
+            incoming: rx,
+            driver,
+        })
+    }
+
+    /// Subscribes to every configured topic filter.
+    pub async fn subscribe_all(
+        client: &AsyncClient,
+        filters: impl IntoIterator<Item = &str>,
+    ) -> Result<(), rumqttc::ClientError> {
+        for filter in filters {
+            client.subscribe(filter, QoS::AtLeastOnce).await?;
+        }
+        Ok(())
+    }
+}
+
+// _    _ _______ _____ _       _____
+//| |  | |__   __|_   _| |     / ____|
+//| |  | |  | |    | | | |    | (___
+//| |  | |  | |    | | | |     \___ \
+//| |__| |  | |   _| |_| |____ ____) |
+// \____/   |_|  |_____|______|_____/
+
 fn parse_pem_certs(
     pem: &[u8],
     context: &'static str,
@@ -56,25 +158,17 @@ fn parse_pem_private_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>, ClientIni
         .ok_or(ClientInitError::MissingPrivateKey)
 }
 
-/// A live connection to an MQTT broker: a client handle for publishing/subscribing, a channel of
-/// incoming messages, and the background task driving the underlying connection.
-pub struct MqttConnection {
-    pub client: AsyncClient,
-    pub incoming: mpsc::Receiver<Publish>,
-    pub driver: JoinHandle<Result<(), BrokerError>>,
-}
-
 /// Builds the `MqttOptions` for `config`, applying `tls`/`allow_self_signed_certs`, `protocol`,
 /// and `auth` on top.
 ///
-/// `config.tls = false` is ignored if `broker.auth.method = mtls`
+/// `config.tls = false` is ignored if `connection.auth.method = mtls`
 fn build_options(
-    config: &BrokerConfig,
+    config: &ConnectionConfig,
     auth: &ResolvedAuth,
 ) -> Result<MqttOptions, ClientInitError> {
     let tls = if !config.tls && matches!(auth, ResolvedAuth::Mtls { .. }) {
         tracing::warn!(
-            "[broker.auth] method = \"mtls\" requires TLS; ignoring broker.tls = false and \
+            "[connection.auth] method = \"mtls\" requires TLS; ignoring connection.tls = false and \
              connecting with TLS anyway"
         );
         true
@@ -172,7 +266,7 @@ impl ServerCertVerifier for NoServerCertVerification {
 
 /// Builds the `TlsConfiguration` for an encrypted connection.
 fn build_tls_config(
-    config: &BrokerConfig,
+    config: &ConnectionConfig,
     auth: &ResolvedAuth,
 ) -> Result<TlsConfiguration, ClientInitError> {
     // Configure how the server is verified.
@@ -217,62 +311,13 @@ fn build_tls_config(
     Ok(TlsConfiguration::Rustls(Arc::new(client_config)))
 }
 
-pub struct Client;
-
-impl Client {
-    /// Connects to the configured broker and spawns a background task that continuously polls
-    /// the connection (required to keep it alive and drive publish acks), forwarding incoming
-    /// Publish packets onto a channel.
-    pub fn connect(
-        config: &BrokerConfig,
-        auth: &ResolvedAuth,
-    ) -> Result<MqttConnection, ClientInitError> {
-        let options = build_options(config, auth)?;
-
-        let (client, mut eventloop) = AsyncClient::new(options, 100);
-        let (tx, rx) = mpsc::channel(100);
-
-        let driver = tokio::spawn(async move {
-            loop {
-                match eventloop.poll().await {
-                    Ok(Event::Incoming(Packet::Publish(publish))) => {
-                        if tx.send(publish).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => return Err(BrokerError::Connection(e)),
-                }
-            }
-            Ok(())
-        });
-
-        Ok(MqttConnection {
-            client,
-            incoming: rx,
-            driver,
-        })
-    }
-
-    /// Subscribes to every configured topic filter.
-    pub async fn subscribe_all(
-        client: &AsyncClient,
-        filters: impl IntoIterator<Item = &str>,
-    ) -> Result<(), rumqttc::ClientError> {
-        for filter in filters {
-            client.subscribe(filter, QoS::AtLeastOnce).await?;
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::WebsocketConfig;
 
-    fn test_config() -> BrokerConfig {
-        BrokerConfig {
+    fn test_config() -> ConnectionConfig {
+        ConnectionConfig {
             host: "127.0.0.1".to_string(),
             port: 1883,
             client_id: "rosetta-mq-test".to_string(),
@@ -283,8 +328,8 @@ mod tests {
         }
     }
 
-    fn websocket_config() -> BrokerConfig {
-        BrokerConfig {
+    fn websocket_config() -> ConnectionConfig {
+        ConnectionConfig {
             protocol: Protocol::Ws(WebsocketConfig {
                 path: "/mqtt".to_string(),
             }),
@@ -323,7 +368,7 @@ mod tests {
             cert: include_bytes!("../tests/fixtures/tls/client-cert.pem").to_vec(),
             key: include_bytes!("../tests/fixtures/tls/client-key.pem").to_vec(),
         };
-        let config = BrokerConfig {
+        let config = ConnectionConfig {
             tls: true,
             ..test_config()
         };
@@ -338,7 +383,7 @@ mod tests {
 
     #[test]
     fn tls_with_no_auth_uses_native_root_store() {
-        let config = BrokerConfig {
+        let config = ConnectionConfig {
             tls: true,
             ..test_config()
         };
@@ -357,7 +402,7 @@ mod tests {
             username: "device-reader".to_string(),
             password: "supersecret".to_string(),
         };
-        let config = BrokerConfig {
+        let config = ConnectionConfig {
             tls: true,
             ..test_config()
         };
@@ -402,7 +447,7 @@ mod tests {
             cert: cert_pem,
             key: key_pem,
         };
-        let config = BrokerConfig {
+        let config = ConnectionConfig {
             tls: true,
             allow_self_signed_certs: true,
             ..test_config()
@@ -421,7 +466,7 @@ mod tests {
             username: "device-reader".to_string(),
             password: "supersecret".to_string(),
         };
-        let config = BrokerConfig {
+        let config = ConnectionConfig {
             tls: true,
             allow_self_signed_certs: true,
             ..test_config()
@@ -469,7 +514,7 @@ mod tests {
             cert: include_bytes!("../tests/fixtures/tls/client-cert.pem").to_vec(),
             key: include_bytes!("../tests/fixtures/tls/client-key.pem").to_vec(),
         };
-        let config = BrokerConfig {
+        let config = ConnectionConfig {
             tls: true,
             ..websocket_config()
         };
@@ -492,7 +537,7 @@ mod tests {
             username: "device-reader".to_string(),
             password: "supersecret".to_string(),
         };
-        let config = BrokerConfig {
+        let config = ConnectionConfig {
             tls: true,
             ..websocket_config()
         };

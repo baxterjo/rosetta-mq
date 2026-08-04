@@ -25,11 +25,11 @@ required).
 
 `rosetta-mq` reads a TOML config file — `rosetta-mq.toml` in the current
 directory by default, or any path passed via `--config`/`-c`. The file has
-two parts: a `[broker]` table, and one or more `[[topic]]` blocks mapping a
+two parts: a `[connection]` table, and one or more `[[topic]]` blocks mapping a
 topic filter to a decoder.
 
 ```toml
-[broker]
+[connection]
 host = "127.0.0.1"
 port = 1883
 client_id = "rosetta-mq"
@@ -60,7 +60,7 @@ template = """
 """
 ```
 
-### `[broker]`
+### `[connection]`
 
 | Field                     | Description                                  |
 |---------------------------|-----------------------------------------------|
@@ -69,27 +69,27 @@ template = """
 | `client_id`               | MQTT client ID used for this connection.      |
 | `tls`                     | **Required.** `true`/`false` — whether the connection is encrypted. |
 | `allow_self_signed_certs` | Optional, defaults to `false`. When `tls` is `true`, accept the broker's certificate with no verification at all (no root store, no hostname check) — for self-hosted/dev brokers using a self-signed cert where distributing a CA file isn't practical. |
-| `auth`                    | Optional `[broker.auth]` table (see below). Omit entirely for an unauthenticated connection. |
+| `auth`                    | Optional `[connection.auth]` table (see below). Omit entirely for an unauthenticated connection. |
 | `protocol`                | Optional, defaults to `"mqtt"`. `"mqtt"` connects over plain TCP/TLS; `"ws"` connects over a websocket upgrade and takes an additional `path` field — see below. |
 
 
-### `[broker.auth]`
+### `[connection.auth]`
 
 Two mutually exclusive auth methods, picked by `method`. Only one may be
 configured per broker.
 
 ```toml
-[broker.auth]
+[connection.auth]
 method = "mtls"
 ca_file = "certs/ca.pem"
 cert_file = "certs/client.pem"
 key_file = "certs/client.key"
 ```
 
-(`tls = true` must also be set on `[broker]` — see above.)
+(`tls = true` must also be set on `[connection]` — see above.)
 
 ```toml
-[broker.auth]
+[connection.auth]
 method = "userpass"
 username = "device-reader"
 password = { env = "MQTT_PASSWORD" } # or a literal string: password = "supersecret"
@@ -108,7 +108,7 @@ follows the same `tls` flag already documented above for plain TCP. `path`
 is only meaningful (and only allowed) alongside `protocol = "ws"`.
 
 ```toml
-[broker]
+[connection]
 protocol = "ws"
 # Optional; "/ws" by default. Set explicitly for brokers that mount MQTT
 # websocket traffic at a specific path, e.g. "/mqtt" or "/ws".

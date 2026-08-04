@@ -3,10 +3,19 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::auth::AuthConfig;
+use crate::client::ConnectionConfig;
 use crate::decoder::DecoderConfig;
 use crate::protocol::Protocol;
 use crate::topic::{TopicError, TopicFilter};
+
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    pub connection: ConnectionConfig,
+    #[serde(rename = "topic", default)]
+    pub topics: Vec<TopicMapping>,
+    #[serde(default)]
+    pub pipeline: PipelineConfig,
+}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -26,15 +35,6 @@ pub enum ConfigError {
     },
     #[error("pipeline.max_concurrent_decodes must be at least 1")]
     InvalidPipelineConfig,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Config {
-    pub broker: BrokerConfig,
-    #[serde(rename = "topic", default)]
-    pub topics: Vec<TopicMapping>,
-    #[serde(default)]
-    pub pipeline: PipelineConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,24 +59,6 @@ impl Default for PipelineConfig {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct BrokerConfig {
-    pub host: String,
-    pub port: u16,
-    pub client_id: String,
-    pub auth: Option<AuthConfig>,
-    /// Use TLS (or WSS when using websockets)
-    pub tls: bool,
-    /// Which protocol carries the connection. Defaults to `mqtt` (plain TCP) when omitted.
-    #[serde(flatten, default)]
-    pub protocol: Protocol,
-    /// When `tls` is set, accept the broker's certificate without any verification (no root
-    /// store, no hostname check) -- for self-hosted/dev brokers using a self-signed cert where
-    /// distributing a CA file isn't practical. Has no effect when `tls` is `false`.
-    #[serde(default)]
-    pub allow_self_signed_certs: bool,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct TopicMapping {
     pub topic_filter: String,
     #[serde(flatten)]
@@ -98,8 +80,11 @@ impl Config {
         // `protocol` key is missing entirely -- known serde limitation, flatten + default don't
         // compose for enums (https://github.com/serde-rs/serde/issues/1626) -- so inject the
         // default explicitly before deserializing.
-        if let Some(broker) = value.get_mut("broker").and_then(toml::Value::as_table_mut) {
-            broker
+        if let Some(connection) = value
+            .get_mut("connection")
+            .and_then(toml::Value::as_table_mut)
+        {
+            connection
                 .entry("protocol")
                 .or_insert_with(|| toml::Value::String("mqtt".to_string()));
         }
@@ -126,7 +111,7 @@ impl Config {
     }
 
     fn normalize(&mut self) {
-        if let Protocol::Ws(ws) = &mut self.broker.protocol {
+        if let Protocol::Ws(ws) = &mut self.connection.protocol {
             ws.normalize();
         }
     }
@@ -135,9 +120,10 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::AuthConfig;
 
     const VALID: &str = r#"
-        [broker]
+        [connection]
         host = "127.0.0.1"
         port = 1883
         client_id = "rosetta-mq"
@@ -161,9 +147,9 @@ mod tests {
     #[test]
     fn parses_valid_config() {
         let config = Config::parse(VALID).unwrap();
-        assert_eq!(config.broker.host, "127.0.0.1");
-        assert_eq!(config.broker.port, 1883);
-        assert_eq!(config.broker.client_id, "rosetta-mq");
+        assert_eq!(config.connection.host, "127.0.0.1");
+        assert_eq!(config.connection.port, 1883);
+        assert_eq!(config.connection.client_id, "rosetta-mq");
         assert_eq!(config.topics.len(), 3);
         assert_eq!(config.topics[0].topic_filter, "devices/+/raw");
         assert!(matches!(config.topics[0].decoder, DecoderConfig::Utf8));
@@ -182,7 +168,7 @@ mod tests {
     fn parses_template_mapping_with_multiline_toml_string() {
         let config = Config::parse(
             r#"
-            [broker]
+            [connection]
             host = "127.0.0.1"
             port = 1883
             client_id = "x"
@@ -216,7 +202,7 @@ mod tests {
     fn parses_template_mapping_undefined_behavior_override() {
         let config = Config::parse(
             r#"
-            [broker]
+            [connection]
             host = "127.0.0.1"
             port = 1883
             client_id = "x"
@@ -246,7 +232,7 @@ mod tests {
     fn rejects_template_mapping_missing_required_field() {
         let err = Config::parse(
             r#"
-            [broker]
+            [connection]
             host = "127.0.0.1"
             port = 1883
             client_id = "x"
@@ -264,7 +250,7 @@ mod tests {
     fn rejects_protobuf_mapping_missing_required_field() {
         let err = Config::parse(
             r#"
-            [broker]
+            [connection]
             host = "127.0.0.1"
             port = 1883
             client_id = "x"
@@ -280,16 +266,16 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_none_when_broker_auth_omitted() {
+    fn defaults_to_none_when_connection_auth_omitted() {
         let config = Config::parse(VALID).unwrap();
-        assert!(config.broker.auth.is_none());
+        assert!(config.connection.auth.is_none());
     }
 
     #[test]
     fn defaults_to_mqtt_protocol_when_omitted() {
         let config = Config::parse(VALID).unwrap();
         assert!(matches!(
-            config.broker.protocol,
+            config.connection.protocol,
             crate::protocol::Protocol::Mqtt
         ));
     }
@@ -298,7 +284,7 @@ mod tests {
     fn parses_ws_protocol_with_path() {
         let config = Config::parse(
             r#"
-            [broker]
+            [connection]
             host = "127.0.0.1"
             port = 1883
             client_id = "x"
@@ -309,7 +295,7 @@ mod tests {
         )
         .unwrap();
 
-        match config.broker.protocol {
+        match config.connection.protocol {
             crate::protocol::Protocol::Ws(ws) => assert_eq!(ws.path, "/mqtt"),
             other => panic!("expected ws protocol, got {other:?}"),
         }
@@ -319,7 +305,7 @@ mod tests {
     fn normalizes_ws_path_missing_leading_slash() {
         let config = Config::parse(
             r#"
-            [broker]
+            [connection]
             host = "127.0.0.1"
             port = 1883
             client_id = "x"
@@ -330,23 +316,23 @@ mod tests {
         )
         .unwrap();
 
-        match config.broker.protocol {
+        match config.connection.protocol {
             crate::protocol::Protocol::Ws(ws) => assert_eq!(ws.path, "/mqtt"),
             other => panic!("expected ws protocol, got {other:?}"),
         }
     }
 
     #[test]
-    fn parses_broker_mtls_auth() {
+    fn parses_connection_mtls_auth() {
         let config = Config::parse(
             r#"
-            [broker]
+            [connection]
             host = "127.0.0.1"
             port = 8883
             client_id = "x"
             tls = true
 
-            [broker.auth]
+            [connection.auth]
             method = "mtls"
             ca_file = "ca.pem"
             cert_file = "client.pem"
@@ -355,7 +341,7 @@ mod tests {
         )
         .unwrap();
 
-        match config.broker.auth {
+        match config.connection.auth {
             Some(AuthConfig::Mtls(cfg)) => {
                 assert_eq!(cfg.ca_file, Path::new("ca.pem"));
                 assert_eq!(cfg.cert_file, Path::new("client.pem"));
@@ -366,16 +352,16 @@ mod tests {
     }
 
     #[test]
-    fn parses_broker_userpass_auth() {
+    fn parses_connection_userpass_auth() {
         let config = Config::parse(
             r#"
-            [broker]
+            [connection]
             host = "127.0.0.1"
             port = 1883
             client_id = "x"
             tls = false
 
-            [broker.auth]
+            [connection.auth]
             method = "userpass"
             username = "device-reader"
             password = { env = "MQTT_PASSWORD" }
@@ -383,7 +369,7 @@ mod tests {
         )
         .unwrap();
 
-        match config.broker.auth {
+        match config.connection.auth {
             Some(AuthConfig::UserPass(cfg)) => {
                 assert_eq!(cfg.username, "device-reader");
                 assert!(
@@ -398,7 +384,7 @@ mod tests {
     fn defaults_to_empty_topics_when_omitted() {
         let config = Config::parse(
             r#"
-            [broker]
+            [connection]
             host = "127.0.0.1"
             port = 1883
             client_id = "x"
@@ -413,7 +399,7 @@ mod tests {
     fn rejects_invalid_topic_filter_at_load_time() {
         let err = Config::parse(
             r#"
-            [broker]
+            [connection]
             host = "127.0.0.1"
             port = 1883
             client_id = "x"
@@ -431,7 +417,7 @@ mod tests {
     fn parses_tls_true() {
         let config = Config::parse(
             r#"
-            [broker]
+            [connection]
             host = "127.0.0.1"
             port = 8883
             client_id = "x"
@@ -439,14 +425,14 @@ mod tests {
         "#,
         )
         .unwrap();
-        assert!(config.broker.tls);
+        assert!(config.connection.tls);
     }
 
     #[test]
-    fn rejects_broker_missing_tls() {
+    fn rejects_connection_missing_tls() {
         let err = Config::parse(
             r#"
-            [broker]
+            [connection]
             host = "127.0.0.1"
             port = 1883
             client_id = "x"
@@ -458,14 +444,14 @@ mod tests {
     #[test]
     fn allow_self_signed_certs_defaults_to_false() {
         let config = Config::parse(VALID).unwrap();
-        assert!(!config.broker.allow_self_signed_certs);
+        assert!(!config.connection.allow_self_signed_certs);
     }
 
     #[test]
     fn parses_allow_self_signed_certs_true() {
         let config = Config::parse(
             r#"
-            [broker]
+            [connection]
             host = "127.0.0.1"
             port = 8883
             client_id = "x"
@@ -474,7 +460,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        assert!(config.broker.allow_self_signed_certs);
+        assert!(config.connection.allow_self_signed_certs);
     }
 
     #[test]
@@ -487,7 +473,7 @@ mod tests {
     fn parses_pipeline_max_concurrent_decodes() {
         let config = Config::parse(
             r#"
-            [broker]
+            [connection]
             host = "127.0.0.1"
             port = 1883
             client_id = "x"
@@ -505,7 +491,7 @@ mod tests {
     fn rejects_zero_max_concurrent_decodes() {
         let err = Config::parse(
             r#"
-            [broker]
+            [connection]
             host = "127.0.0.1"
             port = 1883
             client_id = "x"

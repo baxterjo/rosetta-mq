@@ -12,8 +12,8 @@ use tokio::sync::mpsc::{self, Sender};
 use tokio::time::timeout;
 
 use rosetta_mq::auth::ResolvedAuth;
-use rosetta_mq::client::Client;
-use rosetta_mq::config::{BrokerConfig, Config, PipelineConfig, TopicMapping};
+use rosetta_mq::client::{Client, ConnectionConfig};
+use rosetta_mq::config::{Config, PipelineConfig, TopicMapping};
 use rosetta_mq::decoder::protobuf::ProtobufConfig;
 use rosetta_mq::decoder::template::TemplateConfig;
 use rosetta_mq::decoder::{
@@ -155,7 +155,7 @@ async fn subscribe_decode_republish_end_to_end() {
 
     // 2. Wire up the rosetta-mq pipeline against the embedded broker, exactly as main.rs does.
     let app_config = Config {
-        broker: BrokerConfig {
+        connection: ConnectionConfig {
             host: "127.0.0.1".to_string(),
             port: TEST_PORT,
             client_id: "rosetta-mq-test".to_string(),
@@ -185,7 +185,7 @@ async fn subscribe_decode_republish_end_to_end() {
     }
     let registry = builder.build();
 
-    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None).unwrap();
+    let conn = Client::connect(&app_config.connection, &ResolvedAuth::None).unwrap();
     Client::subscribe_all(
         &conn.client,
         app_config.topics.iter().map(|t| t.topic_filter.as_str()),
@@ -331,7 +331,7 @@ async fn protobuf_decoder_end_to_end() {
     wait_for_port(PROTOBUF_TEST_PORT).await;
 
     let app_config = Config {
-        broker: BrokerConfig {
+        connection: ConnectionConfig {
             host: "127.0.0.1".to_string(),
             port: PROTOBUF_TEST_PORT,
             client_id: "rosetta-mq-protobuf-test".to_string(),
@@ -359,7 +359,7 @@ async fn protobuf_decoder_end_to_end() {
     }
     let registry = builder.build();
 
-    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None).unwrap();
+    let conn = Client::connect(&app_config.connection, &ResolvedAuth::None).unwrap();
     Client::subscribe_all(
         &conn.client,
         app_config.topics.iter().map(|t| t.topic_filter.as_str()),
@@ -451,7 +451,7 @@ async fn template_decoder_end_to_end() {
     wait_for_port(TEMPLATE_TEST_PORT).await;
 
     let app_config = Config {
-        broker: BrokerConfig {
+        connection: ConnectionConfig {
             host: "127.0.0.1".to_string(),
             port: TEMPLATE_TEST_PORT,
             client_id: "rosetta-mq-template-test".to_string(),
@@ -463,8 +463,9 @@ async fn template_decoder_end_to_end() {
         topics: vec![TopicMapping {
             topic_filter: "devices/+/raw".to_string(),
             decoder: DecoderConfig::Template(TemplateConfig {
-                template: "{{ payload.device_id }} reads {{ payload.temperature_c }}C on {{ topic }}"
-                    .to_string(),
+                template:
+                    "{{ payload.device_id }} reads {{ payload.temperature_c }}C on {{ topic }}"
+                        .to_string(),
                 ..Default::default()
             }),
         }],
@@ -479,7 +480,7 @@ async fn template_decoder_end_to_end() {
     }
     let registry = builder.build();
 
-    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None).unwrap();
+    let conn = Client::connect(&app_config.connection, &ResolvedAuth::None).unwrap();
     Client::subscribe_all(
         &conn.client,
         app_config.topics.iter().map(|t| t.topic_filter.as_str()),
@@ -558,7 +559,7 @@ async fn websocket_end_to_end() {
     wait_for_port(WEBSOCKET_TEST_PORT).await;
 
     let app_config = Config {
-        broker: BrokerConfig {
+        connection: ConnectionConfig {
             host: "127.0.0.1".to_string(),
             port: WEBSOCKET_TEST_PORT,
             client_id: "rosetta-mq-websocket-test".to_string(),
@@ -584,7 +585,7 @@ async fn websocket_end_to_end() {
     }
     let registry = builder.build();
 
-    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None).unwrap();
+    let conn = Client::connect(&app_config.connection, &ResolvedAuth::None).unwrap();
     Client::subscribe_all(
         &conn.client,
         app_config.topics.iter().map(|t| t.topic_filter.as_str()),
@@ -723,7 +724,7 @@ async fn bounded_concurrent_decoding() {
         .unwrap();
     let registry = builder.build();
 
-    let broker_cfg = BrokerConfig {
+    let broker_cfg = ConnectionConfig {
         host: "127.0.0.1".to_string(),
         port: CONCURRENCY_TEST_PORT,
         client_id: "rosetta-mq-concurrency-test".to_string(),
@@ -834,7 +835,7 @@ async fn graceful_shutdown_drains_in_flight_task_before_returning() {
         .unwrap();
     let registry = builder.build();
 
-    let broker_cfg = BrokerConfig {
+    let broker_cfg = ConnectionConfig {
         host: "127.0.0.1".to_string(),
         port: SHUTDOWN_TEST_PORT,
         client_id: "rosetta-mq-shutdown-test".to_string(),

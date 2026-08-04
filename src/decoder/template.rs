@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use minijinja::{context, Environment, Value};
+use minijinja::{Environment, Value, context};
 use rumqttc::Publish;
 use serde::Deserialize;
 use thiserror::Error;
