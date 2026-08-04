@@ -7,11 +7,12 @@ use thiserror::Error;
 
 use crate::topic::TopicFilter;
 use async_trait::async_trait;
-use tokio::sync::mpsc::{error::SendError, Sender};
+use tokio::sync::mpsc::{Sender, error::SendError};
 
-pub mod builtin;
+pub mod hexdump;
 pub mod protobuf;
 pub mod template;
+pub mod utf8;
 
 #[derive(Debug, Error)]
 pub enum DecodeError<E: Error> {
@@ -150,7 +151,9 @@ where
         publish: &Publish,
         tx: Sender<DecodePublish>,
     ) -> Result<(), DecodeError<BoxedDecodeError>> {
-        Decoder::decode(self, publish, tx).await.map_err(DecodeError::erase)
+        Decoder::decode(self, publish, tx)
+            .await
+            .map_err(DecodeError::erase)
     }
 }
 
@@ -179,8 +182,8 @@ impl DecoderConfig {
     /// `proto_file`) against the config file's directory rather than the process's CWD.
     pub fn build(&self, base_dir: &Path) -> Result<Arc<dyn ErasedDecoder>, BuildDecoderError> {
         match self {
-            DecoderConfig::Hexdump => Ok(Arc::new(builtin::HexDumpDecoder)),
-            DecoderConfig::Utf8 => Ok(Arc::new(builtin::Utf8Decoder)),
+            DecoderConfig::Hexdump => Ok(Arc::new(hexdump::HexDumpDecoder)),
+            DecoderConfig::Utf8 => Ok(Arc::new(utf8::Utf8Decoder)),
             DecoderConfig::Protobuf(cfg) => Ok(Arc::new(protobuf::ProtobufDecoder::from_config(
                 cfg, base_dir,
             )?)),
@@ -263,7 +266,7 @@ impl DecoderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decoder::builtin::{HexDumpDecoder, Utf8Decoder};
+    use crate::decoder::{hexdump::HexDumpDecoder, utf8::Utf8Decoder};
 
     #[test]
     fn resolves_most_specific_match() {
