@@ -3,7 +3,7 @@
 #   just broker      # 1: local mosquitto broker
 #   just run         # 2: rosetta-mq against rosetta-mq.toml
 #   just watch       # 3: see every raw/decoded/decode_error message go by
-#   just pub-utf8 / just pub-hex / just pub-proto / just pub-template / just pub-invalid   # 4: publish test messages
+#   just pub / just pub-proto / just pub-invalid   # 4: publish test messages
 
 # Start a local mosquitto broker on 127.0.0.1:1883 (anonymous access, foreground).
 broker:
