@@ -100,7 +100,7 @@ fn handle_incoming(
     };
 
     // A `#` (or otherwise broad) topic_filter can match our own `.../decoded` and
-    // `.../decode_error` output topics, which would otherwise cause the pipeline to decode its
+    // `.../decode_error` output topics, which would otherwise cause the engine to decode its
     // own republished messages forever. Never treat our own output as new input.
     if message.topic.ends_with("/decoded") || message.topic.ends_with("/decode_error") {
         return ControlFlow::Continue(());

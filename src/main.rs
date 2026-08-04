@@ -5,7 +5,7 @@ use clap::Parser;
 use rosetta_mq::client::Client;
 use rosetta_mq::config::Config;
 use rosetta_mq::decoder::DecoderRegistryBuilder;
-use rosetta_mq::pipeline;
+use rosetta_mq::engine;
 use rosetta_mq::topic::TopicFilter;
 use tokio_util::sync::CancellationToken;
 
@@ -73,11 +73,11 @@ async fn main() -> anyhow::Result<()> {
     .context("subscribing to configured topics")?;
 
     let shutdown = CancellationToken::new();
-    let pipeline_handle = tokio::spawn(pipeline::run(
+    let engine_handle = tokio::spawn(engine::run(
         conn.incoming,
         conn.client.clone(),
         registry,
-        config.pipeline.max_concurrent_decodes,
+        config.engine.max_concurrent_decodes,
         shutdown.clone(),
     ));
 
@@ -90,11 +90,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Signals `pipeline::run` to stop taking new messages and drain in-flight ones (bounded by
+    // Signals `engine::run` to stop taking new messages and drain in-flight ones (bounded by
     // its own internal timeout) rather than aborting them mid-flight by dropping its task.
     shutdown.cancel();
-    if let Err(err) = pipeline_handle.await {
-        tracing::error!(error = %err, "pipeline task panicked");
+    if let Err(err) = engine_handle.await {
+        tracing::error!(error = %err, "engine task panicked");
     }
 
     Ok(())

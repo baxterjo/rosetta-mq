@@ -207,12 +207,12 @@ For `"template"`:
   | `"chainable"`      | Attribute access on an undefined value returns another undefined value instead of failing, so a chain like `{{ payload.a.b }}` fails only when printed/iterated, not at the first missing link. |
   | `"lenient"`        | Undefined values print as an empty string and iterate as empty — matches Jinja2's own default behavior. |
 
-### `[pipeline]`
+### `[engine]`
 
 ```toml
-[pipeline]
+[engine]
 # Optional; defaults to 100. Maximum number of incoming messages decoded and
-# republished concurrently. Once this many are in flight, the pipeline stops
+# republished concurrently. Once this many are in flight, the engine stops
 # pulling new messages until one finishes.
 max_concurrent_decodes = 100
 ```

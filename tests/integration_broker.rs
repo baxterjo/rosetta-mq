@@ -13,13 +13,13 @@ use tokio::time::timeout;
 
 use rosetta_mq::auth::ResolvedAuth;
 use rosetta_mq::client::{Client, ConnectionConfig};
-use rosetta_mq::config::{Config, PipelineConfig, RefOr, TopicMapping};
+use rosetta_mq::config::{Config, EngineConfig, RefOr, TopicMapping};
 use rosetta_mq::decoder::protobuf::ProtobufConfig;
 use rosetta_mq::decoder::template::TemplateConfig;
 use rosetta_mq::decoder::{
     DecodeError, DecodePublish, Decoder, DecoderConfig, DecoderRegistryBuilder,
 };
-use rosetta_mq::pipeline;
+use rosetta_mq::engine;
 use rosetta_mq::protocol::{Protocol, WebsocketConfig};
 use rosetta_mq::topic::TopicFilter;
 use tokio_util::sync::CancellationToken;
@@ -140,7 +140,7 @@ async fn wait_for_port(port: u16) {
     }
 }
 
-/// Runs entirely in one test process: an embedded rumqttd broker, the rosetta-mq pipeline, and
+/// Runs entirely in one test process: an embedded rumqttd broker, the rosetta-mq engine, and
 /// a second "observer" rumqttc client all in-process, over real TCP on a local test port. No
 /// external broker or extra terminal/process is needed.
 #[tokio::test]
@@ -153,7 +153,7 @@ async fn subscribe_decode_republish_end_to_end() {
     });
     wait_for_port(TEST_PORT).await;
 
-    // 2. Wire up the rosetta-mq pipeline against the embedded broker, exactly as main.rs does.
+    // 2. Wire up the rosetta-mq engine against the embedded broker, exactly as main.rs does.
     let app_config = Config {
         connection: ConnectionConfig {
             host: "127.0.0.1".to_string(),
@@ -175,7 +175,7 @@ async fn subscribe_decode_republish_end_to_end() {
             },
         ],
         decoders: HashMap::new(),
-        pipeline: PipelineConfig::default(),
+        engine: EngineConfig::default(),
     };
 
     let registry = build_registry(&app_config, Path::new("."));
@@ -188,12 +188,12 @@ async fn subscribe_decode_republish_end_to_end() {
     .await
     .unwrap();
 
-    let pipeline_client = conn.client.clone();
-    tokio::spawn(pipeline::run(
+    let engine_client = conn.client.clone();
+    tokio::spawn(engine::run(
         conn.incoming,
-        pipeline_client,
+        engine_client,
         registry,
-        app_config.pipeline.max_concurrent_decodes,
+        app_config.engine.max_concurrent_decodes,
         CancellationToken::new(),
     ));
 
@@ -230,7 +230,7 @@ async fn subscribe_decode_republish_end_to_end() {
         .subscribe("devices/42/raw/decode_error", QoS::AtLeastOnce)
         .await
         .unwrap();
-    // Subscribed with the same '#' breadth as the pipeline's own mapping, so this would also
+    // Subscribed with the same '#' breadth as the engine's own mapping, so this would also
     // catch a feedback loop (`.../decoded/decoded`, etc.) if the guard below regresses.
     test_client
         .subscribe("sensors/#", QoS::AtLeastOnce)
@@ -284,7 +284,7 @@ async fn subscribe_decode_republish_end_to_end() {
         .unwrap();
 
     // We're subscribed via "sensors/#", which also matches the raw topic we just published to,
-    // so we first see our own echoed publish before the pipeline's decoded output.
+    // so we first see our own echoed publish before the engine's decoded output.
     let (echo_topic, _) = timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("timed out waiting for raw echo")
@@ -344,7 +344,7 @@ async fn protobuf_decoder_end_to_end() {
             }))),
         }],
         decoders: HashMap::new(),
-        pipeline: PipelineConfig::default(),
+        engine: EngineConfig::default(),
     };
 
     let registry = build_registry(&app_config, Path::new("."));
@@ -357,12 +357,12 @@ async fn protobuf_decoder_end_to_end() {
     .await
     .unwrap();
 
-    let pipeline_client = conn.client.clone();
-    tokio::spawn(pipeline::run(
+    let engine_client = conn.client.clone();
+    tokio::spawn(engine::run(
         conn.incoming,
-        pipeline_client,
+        engine_client,
         registry,
-        app_config.pipeline.max_concurrent_decodes,
+        app_config.engine.max_concurrent_decodes,
         CancellationToken::new(),
     ));
 
@@ -460,7 +460,7 @@ async fn template_decoder_end_to_end() {
             }))),
         }],
         decoders: HashMap::new(),
-        pipeline: PipelineConfig::default(),
+        engine: EngineConfig::default(),
     };
 
     let registry = build_registry(&app_config, Path::new("."));
@@ -473,12 +473,12 @@ async fn template_decoder_end_to_end() {
     .await
     .unwrap();
 
-    let pipeline_client = conn.client.clone();
-    tokio::spawn(pipeline::run(
+    let engine_client = conn.client.clone();
+    tokio::spawn(engine::run(
         conn.incoming,
-        pipeline_client,
+        engine_client,
         registry,
-        app_config.pipeline.max_concurrent_decodes,
+        app_config.engine.max_concurrent_decodes,
         CancellationToken::new(),
     ));
 
@@ -531,7 +531,7 @@ async fn template_decoder_end_to_end() {
 }
 
 /// Proves the websocket transport carries real traffic end-to-end -- same embedded-broker shape
-/// as `subscribe_decode_republish_end_to_end`, but both the pipeline's connection and the
+/// as `subscribe_decode_republish_end_to_end`, but both the engine's connection and the
 /// observer connection go over `ws://` instead of raw TCP. Doesn't repeat every case from the TCP
 /// test; just proves messages round-trip over websocket the same way they do over TCP.
 #[tokio::test]
@@ -560,7 +560,7 @@ async fn websocket_end_to_end() {
             decoder: Some(RefOr::Literal(DecoderConfig::Utf8)),
         }],
         decoders: HashMap::new(),
-        pipeline: PipelineConfig::default(),
+        engine: EngineConfig::default(),
     };
 
     let registry = build_registry(&app_config, Path::new("."));
@@ -573,12 +573,12 @@ async fn websocket_end_to_end() {
     .await
     .unwrap();
 
-    let pipeline_client = conn.client.clone();
-    tokio::spawn(pipeline::run(
+    let engine_client = conn.client.clone();
+    tokio::spawn(engine::run(
         conn.incoming,
-        pipeline_client,
+        engine_client,
         registry,
-        app_config.pipeline.max_concurrent_decodes,
+        app_config.engine.max_concurrent_decodes,
         CancellationToken::new(),
     ));
 
@@ -719,10 +719,10 @@ async fn bounded_concurrent_decoding() {
         .await
         .unwrap();
 
-    let pipeline_client = conn.client.clone();
-    tokio::spawn(pipeline::run(
+    let engine_client = conn.client.clone();
+    tokio::spawn(engine::run(
         conn.incoming,
-        pipeline_client,
+        engine_client,
         registry,
         CAP,
         CancellationToken::new(),
@@ -784,7 +784,7 @@ async fn bounded_concurrent_decoding() {
 }
 
 /// Proves cancellation is a graceful shutdown, not an abort: an in-flight decode/publish must
-/// still complete and be republished after `shutdown.cancel()`, and `pipeline::run` must return
+/// still complete and be republished after `shutdown.cancel()`, and `engine::run` must return
 /// once that happens rather than sitting out its full drain timeout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn graceful_shutdown_drains_in_flight_task_before_returning() {
@@ -830,11 +830,11 @@ async fn graceful_shutdown_drains_in_flight_task_before_returning() {
         .await
         .unwrap();
 
-    let pipeline_client = conn.client.clone();
+    let engine_client = conn.client.clone();
     let shutdown = CancellationToken::new();
-    let pipeline_handle = tokio::spawn(pipeline::run(
+    let engine_handle = tokio::spawn(engine::run(
         conn.incoming,
-        pipeline_client,
+        engine_client,
         registry,
         10,
         shutdown.clone(),
@@ -875,10 +875,10 @@ async fn graceful_shutdown_drains_in_flight_task_before_returning() {
 
     shutdown.cancel();
 
-    timeout(Duration::from_secs(2), pipeline_handle)
+    timeout(Duration::from_secs(2), engine_handle)
         .await
-        .expect("pipeline::run did not return promptly after cancellation")
-        .expect("pipeline task panicked");
+        .expect("engine::run did not return promptly after cancellation")
+        .expect("engine task panicked");
 
     let topic = timeout(Duration::from_secs(1), rx.recv())
         .await

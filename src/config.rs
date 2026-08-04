@@ -19,7 +19,7 @@ pub struct Config {
     #[serde(rename = "decoder", default)]
     pub decoders: HashMap<String, DecoderConfig>,
     #[serde(default)]
-    pub pipeline: PipelineConfig,
+    pub engine: EngineConfig,
 }
 
 #[derive(Debug, Error)]
@@ -38,8 +38,8 @@ pub enum ConfigError {
         #[source]
         source: TopicError,
     },
-    #[error("pipeline.max_concurrent_decodes must be at least 1")]
-    InvalidPipelineConfig,
+    #[error("engine.max_concurrent_decodes must be at least 1")]
+    InvalidEngineConfig,
     #[error("topic_filter {topic_filter:?} references unknown decoder {decoder_ref:?}")]
     UnknownDecoderRef {
         topic_filter: String,
@@ -48,19 +48,19 @@ pub enum ConfigError {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PipelineConfig {
+pub struct EngineConfig {
     /// Maximum number of incoming messages decoded and republished concurrently.
-    #[serde(default = "PipelineConfig::default_max_concurrent_decodes")]
+    #[serde(default = "EngineConfig::default_max_concurrent_decodes")]
     pub max_concurrent_decodes: usize,
 }
 
-impl PipelineConfig {
+impl EngineConfig {
     fn default_max_concurrent_decodes() -> usize {
         100
     }
 }
 
-impl Default for PipelineConfig {
+impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             max_concurrent_decodes: Self::default_max_concurrent_decodes(),
@@ -125,8 +125,8 @@ impl Config {
                 }
             }
         }
-        if self.pipeline.max_concurrent_decodes == 0 {
-            return Err(ConfigError::InvalidPipelineConfig);
+        if self.engine.max_concurrent_decodes == 0 {
+            return Err(ConfigError::InvalidEngineConfig);
         }
         Ok(())
     }
@@ -594,13 +594,13 @@ mod tests {
     }
 
     #[test]
-    fn defaults_max_concurrent_decodes_when_pipeline_omitted() {
+    fn defaults_max_concurrent_decodes_when_engine_omitted() {
         let config = Config::parse(VALID).unwrap();
-        assert_eq!(config.pipeline.max_concurrent_decodes, 100);
+        assert_eq!(config.engine.max_concurrent_decodes, 100);
     }
 
     #[test]
-    fn parses_pipeline_max_concurrent_decodes() {
+    fn parses_engine_max_concurrent_decodes() {
         let config = Config::parse(
             r#"
             [connection]
@@ -609,12 +609,12 @@ mod tests {
             client_id = "x"
             tls = false
 
-            [pipeline]
+            [engine]
             max_concurrent_decodes = 5
         "#,
         )
         .unwrap();
-        assert_eq!(config.pipeline.max_concurrent_decodes, 5);
+        assert_eq!(config.engine.max_concurrent_decodes, 5);
     }
 
     #[test]
@@ -627,11 +627,11 @@ mod tests {
             client_id = "x"
             tls = false
 
-            [pipeline]
+            [engine]
             max_concurrent_decodes = 0
         "#,
         );
-        assert!(matches!(err, Err(ConfigError::InvalidPipelineConfig)));
+        assert!(matches!(err, Err(ConfigError::InvalidEngineConfig)));
     }
 
     #[test]
