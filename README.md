@@ -136,7 +136,7 @@ Built-in decoders:
 | `"utf8"`     | —                                                                              | Decodes the payload as UTF-8 text. (Mostly used for testing)                |
 | `"hexdump"`  | —                                                                              | Renders the raw payload bytes as hex.             |
 | `"protobuf"` | `proto_file`, `message_type`, `include_paths` (optional)                     | Decodes a Protobuf payload to JSON using a schema.|
-| `"template"` | `template`                                                                    | Renders the message through a user-authored Jinja2-compatible template.|
+| `"template"` | `template`, `undefined_behavior` (optional)                                   | Renders the message through a user-authored Jinja2-compatible template.|
 
 For `"protobuf"`:
 - `proto_file` — path to the `.proto` file defining the message, resolved
@@ -161,9 +161,17 @@ For `"template"`:
   `payload` is the raw bytes hex-encoded as a string.
 - Referencing a field that doesn't exist — a missing JSON key, indexing into
   a payload that isn't JSON, or a typo'd variable name — is a decode failure,
-  not blank output. Like any other decode failure, it's still republished
-  (to `.../decode_error`, with the render error and the raw payload as hex)
-  rather than silently dropped.
+  not blank output, by default. Like any other decode failure, it's still
+  republished (to `.../decode_error`, with the render error and the raw
+  payload as hex) rather than silently dropped.
+- `undefined_behavior` — optional, defaults to `"strict"`. Controls how
+  undefined references (above) are handled:
+  | Value              | Behavior                                                            |
+  |--------------------|----------------------------------------------------------------------|
+  | `"strict"`         | Any use of an undefined value (printing, iterating, attribute access, truthiness) is a decode failure. |
+  | `"semi_strict"`    | Like `"strict"`, but checking an undefined value for truthiness (e.g. `{% if maybe_field %}`) is allowed instead of failing. |
+  | `"chainable"`      | Attribute access on an undefined value returns another undefined value instead of failing, so a chain like `{{ payload.a.b }}` fails only when printed/iterated, not at the first missing link. |
+  | `"lenient"`        | Undefined values print as an empty string and iterate as empty — matches Jinja2's own default behavior. |
 
 ### `[pipeline]`
 

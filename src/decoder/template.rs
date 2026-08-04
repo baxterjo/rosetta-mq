@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use minijinja::{context, Environment, UndefinedBehavior, Value};
+use minijinja::{context, Environment, Value};
 use rumqttc::Publish;
 use serde::Deserialize;
 use thiserror::Error;
@@ -11,12 +11,40 @@ use crate::decoder::{DecodeError, DecodePublish, Decoder};
 /// user-facing, just an internal key into the `minijinja::Environment`.
 const TEMPLATE_NAME: &str = "message";
 
+/// Mirrors `minijinja::UndefinedBehavior` for TOML config -- `minijinja`'s own type doesn't
+/// implement `Deserialize`, so this is what `undefined_behavior` in config actually deserializes
+/// into, then gets converted via `From` below. See `minijinja::UndefinedBehavior`'s own docs for
+/// exact per-variant semantics (printing/iteration/attribute-access/truthiness); `Strict` is the
+/// default here to match this project's "never silently produce a misleading result" posture for
+/// a debugging tool -- a typo'd field name should surface as a decode failure, not blank output.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UndefinedBehavior {
+    Lenient,
+    Chainable,
+    SemiStrict,
+    #[default]
+    Strict,
+}
+
+impl From<UndefinedBehavior> for minijinja::UndefinedBehavior {
+    fn from(value: UndefinedBehavior) -> Self {
+        match value {
+            UndefinedBehavior::Lenient => minijinja::UndefinedBehavior::Lenient,
+            UndefinedBehavior::Chainable => minijinja::UndefinedBehavior::Chainable,
+            UndefinedBehavior::SemiStrict => minijinja::UndefinedBehavior::SemiStrict,
+            UndefinedBehavior::Strict => minijinja::UndefinedBehavior::Strict,
+        }
+    }
+}
+
 /// Per-topic config for the template decoder: the Jinja2-compatible template text itself, written
-/// directly in the TOML config (not a path to an external file -- there's no analogue to
-/// `ProtobufConfig::proto_file` here since the ask is specifically to author templates inline).
-#[derive(Debug, Deserialize)]
+/// directly in the TOML config.
+#[derive(Debug, Default, Deserialize)]
 pub struct TemplateConfig {
     pub template: String,
+    #[serde(default)]
+    pub undefined_behavior: UndefinedBehavior,
 }
 
 #[derive(Debug, Error)]
@@ -32,8 +60,7 @@ pub enum TemplateDecoderError {
 /// `retain`, `dup`, `pkid`), plus `payload`: parsed and indexable (`payload.field`, `payload[0]`,
 /// ...) when the payload is JSON, otherwise a plain string, or a hex string when the payload
 /// isn't even valid UTF-8. Undefined references (a missing JSON field, indexing into a non-JSON
-/// payload, a typo'd variable name) are a hard render error rather than blank output -- this is a
-/// debugging tool, so a typo should surface as a decode failure, not silently misleading output.
+/// payload, a typo'd variable name) are a hard render error rather than blank output.
 #[derive(Debug)]
 pub struct TemplateDecoder {
     env: Environment<'static>,
@@ -42,7 +69,7 @@ pub struct TemplateDecoder {
 impl TemplateDecoder {
     pub fn from_config(cfg: &TemplateConfig) -> Result<Self, TemplateDecoderError> {
         let mut env = Environment::new();
-        env.set_undefined_behavior(UndefinedBehavior::Strict);
+        env.set_undefined_behavior(cfg.undefined_behavior.into());
         env.add_template_owned(TEMPLATE_NAME, cfg.template.clone())
             .map_err(TemplateDecoderError::Parse)?;
         Ok(Self { env })
@@ -115,6 +142,7 @@ mod tests {
     async fn indexes_json_payload_fields() {
         let decoder = TemplateDecoder::from_config(&TemplateConfig {
             template: "{{ payload.device_id }} is {{ payload.temperature_c }}C".to_string(),
+            ..Default::default()
         })
         .unwrap();
         let publish = Publish::new(
@@ -133,6 +161,7 @@ mod tests {
     async fn renders_publish_packet_fields() {
         let decoder = TemplateDecoder::from_config(&TemplateConfig {
             template: "{{ topic }} {{ qos }} {{ retain }} {{ dup }} {{ pkid }}".to_string(),
+            ..Default::default()
         })
         .unwrap();
         let mut publish = Publish::new("devices/42/raw", QoS::AtLeastOnce, b"hi".to_vec());
@@ -150,6 +179,7 @@ mod tests {
     async fn treats_plain_text_payload_as_string() {
         let decoder = TemplateDecoder::from_config(&TemplateConfig {
             template: "raw: {{ payload | upper }}".to_string(),
+            ..Default::default()
         })
         .unwrap();
         let publish = Publish::new("devices/42/raw", QoS::AtLeastOnce, b"hello device".to_vec());
@@ -164,6 +194,7 @@ mod tests {
     async fn renders_non_utf8_payload_as_hex() {
         let decoder = TemplateDecoder::from_config(&TemplateConfig {
             template: "{{ payload }}".to_string(),
+            ..Default::default()
         })
         .unwrap();
         let publish = Publish::new("devices/42/raw", QoS::AtLeastOnce, vec![0xff, 0x00, 0x10]);
@@ -178,6 +209,7 @@ mod tests {
     async fn indexing_non_json_payload_is_a_decode_failure() {
         let decoder = TemplateDecoder::from_config(&TemplateConfig {
             template: "{{ payload.device_id }}".to_string(),
+            ..Default::default()
         })
         .unwrap();
         let publish = Publish::new("devices/42/raw", QoS::AtLeastOnce, b"not json".to_vec());
@@ -194,6 +226,7 @@ mod tests {
     async fn undefined_variable_is_a_decode_failure() {
         let decoder = TemplateDecoder::from_config(&TemplateConfig {
             template: "{{ does_not_exist }}".to_string(),
+            ..Default::default()
         })
         .unwrap();
         let publish = Publish::new("devices/42/raw", QoS::AtLeastOnce, b"hi".to_vec());
@@ -206,10 +239,26 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn lenient_undefined_behavior_renders_blank_instead_of_failing() {
+        let decoder = TemplateDecoder::from_config(&TemplateConfig {
+            template: "[{{ does_not_exist }}]".to_string(),
+            undefined_behavior: UndefinedBehavior::Lenient,
+        })
+        .unwrap();
+        let publish = Publish::new("devices/42/raw", QoS::AtLeastOnce, b"hi".to_vec());
+
+        let (tx, mut rx) = mpsc::channel(1);
+        decoder.decode(&publish, tx).await.unwrap();
+        let decoded = rx.recv().await.unwrap();
+        assert_eq!(decoded.payload, b"[]");
+    }
+
     #[test]
     fn fails_to_construct_with_invalid_template_syntax() {
         let err = TemplateDecoder::from_config(&TemplateConfig {
             template: "{{ unclosed".to_string(),
+            ..Default::default()
         })
         .unwrap_err();
         assert!(matches!(err, TemplateDecoderError::Parse(_)));

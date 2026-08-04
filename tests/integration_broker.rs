@@ -465,6 +465,7 @@ async fn template_decoder_end_to_end() {
             decoder: DecoderConfig::Template(TemplateConfig {
                 template: "{{ payload.device_id }} reads {{ payload.temperature_c }}C on {{ topic }}"
                     .to_string(),
+                ..Default::default()
             }),
         }],
         pipeline: PipelineConfig::default(),
