@@ -22,10 +22,12 @@ const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Decode/republish loop: for each incoming message, resolves a decoder for its topic and spawns
 /// a task that drains whatever it publishes to `{topic}/decoded` (a decoder may emit zero, one,
-/// or a stream of messages). A decoder that fails, or has no match, republishes an error message
-/// plus the raw payload as hex to `{topic}/decode_error` instead, so the mirrored topics always
-/// reflect one message per input message. A failed publish is logged rather than fatal — one bad
-/// publish must not kill the rest of the subscriber loop.
+/// or a stream of messages). A decoder that fails republishes an error message plus the raw
+/// payload as hex to `{topic}/decode_error` instead, so a topic with a decoder assigned always
+/// gets one output message per input message. A topic with no decoder configured at all is a
+/// silent no-op by design (subscribed for visibility, never mirrored) — see `handle_incoming`. A
+/// failed publish is logged rather than fatal — one bad publish must not kill the rest of the
+/// subscriber loop.
 ///
 /// Up to `max_concurrent_decodes` messages are decoded and republished concurrently, so a slow or
 /// long-streaming decode doesn't stall messages behind it. Once that many are in flight, intake
@@ -85,7 +87,8 @@ async fn drain(tasks: &mut JoinSet<()>) {
 }
 
 /// Handles one item off `incoming`: `Break` means the channel closed and `run`'s loop should
-/// stop; `Continue` covers everything else (own-topic skip, no-decoder skip, or a spawned task).
+/// stop; `Continue` covers everything else (own-topic skip, no-decoder-configured skip, or a
+/// spawned task).
 fn handle_incoming(
     message: Option<Publish>,
     registry: &DecoderRegistry,
@@ -104,7 +107,12 @@ fn handle_incoming(
     }
 
     let Some(decoder) = registry.resolve(&message.topic) else {
-        tracing::warn!(topic = %message.topic, "no decoder registered for topic");
+        // No decoder was configured for this topic -- an intentional, expected state (a
+        // subscribe-only topic), not a problem, so this doesn't warrant a warning.
+        tracing::debug!(
+            topic = %message.topic,
+            "no decoder configured for topic; message received, not republished"
+        );
         return ControlFlow::Continue(());
     };
 

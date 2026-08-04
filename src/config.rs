@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::client::ConnectionConfig;
@@ -13,6 +14,10 @@ pub struct Config {
     pub connection: ConnectionConfig,
     #[serde(rename = "topic", default)]
     pub topics: Vec<TopicMapping>,
+    /// Named, reusable decoder definitions (`[decoder.NAME]` in TOML), referenced from `[[topic]]`
+    /// blocks via `RefOr::Ref`.
+    #[serde(rename = "decoder", default)]
+    pub decoders: HashMap<String, DecoderConfig>,
     #[serde(default)]
     pub pipeline: PipelineConfig,
 }
@@ -35,6 +40,11 @@ pub enum ConfigError {
     },
     #[error("pipeline.max_concurrent_decodes must be at least 1")]
     InvalidPipelineConfig,
+    #[error("topic_filter {topic_filter:?} references unknown decoder {decoder_ref:?}")]
+    UnknownDecoderRef {
+        topic_filter: String,
+        decoder_ref: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,8 +71,10 @@ impl Default for PipelineConfig {
 #[derive(Debug, Deserialize)]
 pub struct TopicMapping {
     pub topic_filter: String,
-    #[serde(flatten)]
-    pub decoder: DecoderConfig,
+    /// `None` subscribes to `topic_filter` without decoding or republishing anything -- a pure
+    /// pass-through for visibility. `Some` decodes matches, either via a named reference into
+    /// [`Config::decoders`] (`RefOr::Ref`) or an inline literal (`RefOr::Literal`).
+    pub decoder: Option<RefOr<DecoderConfig>>,
 }
 
 impl Config {
@@ -94,7 +106,8 @@ impl Config {
         Ok(config)
     }
 
-    /// Eagerly validates topic filters at load time rather than at first-message time.
+    /// Eagerly validates topic filters and decoder references at load time rather than at
+    /// first-message time.
     fn validate(&self) -> Result<(), ConfigError> {
         for mapping in &self.topics {
             TopicFilter::parse(&mapping.topic_filter).map_err(|source| {
@@ -103,6 +116,14 @@ impl Config {
                     source,
                 }
             })?;
+            if let Some(RefOr::Ref(name)) = &mapping.decoder {
+                if !self.decoders.contains_key(name) {
+                    return Err(ConfigError::UnknownDecoderRef {
+                        topic_filter: mapping.topic_filter.clone(),
+                        decoder_ref: name.clone(),
+                    });
+                }
+            }
         }
         if self.pipeline.max_concurrent_decodes == 0 {
             return Err(ConfigError::InvalidPipelineConfig);
@@ -113,6 +134,28 @@ impl Config {
     fn normalize(&mut self) {
         if let Protocol::Ws(ws) = &mut self.connection.protocol {
             ws.normalize();
+        }
+    }
+}
+
+/// Either a name referencing a shared definition elsewhere in the config (`Ref`), or the
+/// definition written out inline (`Literal`). Used for `TopicMapping.decoder` so a topic can
+/// either reuse a named `[decoder.NAME]` table or define a one-off decoder directly on itself.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RefOr<T> {
+    Ref(String),
+    Literal(T),
+}
+
+impl<T> RefOr<T>
+where
+    T: Clone,
+{
+    pub fn resolve(&self, source: &HashMap<String, T>) -> Option<T> {
+        match self {
+            RefOr::Ref(s) => source.get(s).cloned(),
+            RefOr::Literal(i) => Some(i).cloned(),
         }
     }
 }
@@ -129,19 +172,28 @@ mod tests {
         client_id = "rosetta-mq"
         tls = false
 
+        [decoder.utf8]
+        decoder = "utf8"
+
+        [decoder.hex]
+        decoder = "hexdump"
+
+        [decoder.proto]
+        decoder = "protobuf"
+        proto_file = "schemas/device.proto"
+        message_type = "device.v1.DeviceReading"
+
         [[topic]]
         topic_filter = "devices/+/raw"
         decoder = "utf8"
 
         [[topic]]
         topic_filter = "sensors/#"
-        decoder = "hexdump"
+        decoder = "hex"
 
         [[topic]]
         topic_filter = "devices/+/proto"
-        decoder = "protobuf"
-        proto_file = "schemas/device.proto"
-        message_type = "device.v1.DeviceReading"
+        decoder = "proto"
     "#;
 
     #[test]
@@ -152,10 +204,20 @@ mod tests {
         assert_eq!(config.connection.client_id, "rosetta-mq");
         assert_eq!(config.topics.len(), 3);
         assert_eq!(config.topics[0].topic_filter, "devices/+/raw");
-        assert!(matches!(config.topics[0].decoder, DecoderConfig::Utf8));
-        assert!(matches!(config.topics[1].decoder, DecoderConfig::Hexdump));
-        match &config.topics[2].decoder {
-            DecoderConfig::Protobuf(cfg) => {
+        assert!(matches!(
+            &config.topics[0].decoder,
+            Some(RefOr::Ref(name)) if name == "utf8"
+        ));
+        assert!(matches!(
+            config.decoders.get("utf8"),
+            Some(DecoderConfig::Utf8)
+        ));
+        assert!(matches!(
+            config.decoders.get("hex"),
+            Some(DecoderConfig::Hexdump)
+        ));
+        match config.decoders.get("proto") {
+            Some(DecoderConfig::Protobuf(cfg)) => {
                 assert_eq!(cfg.proto_file, "schemas/device.proto");
                 assert_eq!(cfg.message_type, "device.v1.DeviceReading");
                 assert!(cfg.include_paths.is_empty());
@@ -174,19 +236,22 @@ mod tests {
             client_id = "x"
             tls = false
 
-            [[topic]]
-            topic_filter = "devices/+/raw"
+            [decoder.json_template]
             decoder = "template"
             template = """
             topic: {{ topic }}
             device: {{ payload.device_id }}
             """
+
+            [[topic]]
+            topic_filter = "devices/+/raw"
+            decoder = "json_template"
         "#,
         )
         .unwrap();
 
-        match &config.topics[0].decoder {
-            DecoderConfig::Template(cfg) => {
+        match config.decoders.get("json_template") {
+            Some(DecoderConfig::Template(cfg)) => {
                 assert!(cfg.template.contains("topic: {{ topic }}"));
                 assert!(cfg.template.contains("device: {{ payload.device_id }}"));
                 assert!(matches!(
@@ -208,17 +273,20 @@ mod tests {
             client_id = "x"
             tls = false
 
-            [[topic]]
-            topic_filter = "devices/+/raw"
+            [decoder.json_template]
             decoder = "template"
             template = "{{ topic }}"
             undefined_behavior = "lenient"
+
+            [[topic]]
+            topic_filter = "devices/+/raw"
+            decoder = "json_template"
         "#,
         )
         .unwrap();
 
-        match &config.topics[0].decoder {
-            DecoderConfig::Template(cfg) => {
+        match config.decoders.get("json_template") {
+            Some(DecoderConfig::Template(cfg)) => {
                 assert!(matches!(
                     cfg.undefined_behavior,
                     crate::decoder::template::UndefinedBehavior::Lenient
@@ -238,8 +306,7 @@ mod tests {
             client_id = "x"
             tls = false
 
-            [[topic]]
-            topic_filter = "devices/+/raw"
+            [decoder.json_template]
             decoder = "template"
         "#,
         );
@@ -256,13 +323,76 @@ mod tests {
             client_id = "x"
             tls = false
 
-            [[topic]]
-            topic_filter = "devices/+/proto"
+            [decoder.proto]
             decoder = "protobuf"
             proto_file = "schemas/device.proto"
         "#,
         );
         assert!(matches!(err, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn topic_without_decoder_parses_to_none_and_is_subscribe_only() {
+        let config = Config::parse(
+            r#"
+            [connection]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+            tls = false
+
+            [[topic]]
+            topic_filter = "devices/+/status"
+        "#,
+        )
+        .unwrap();
+
+        assert!(config.topics[0].decoder.is_none());
+    }
+
+    #[test]
+    fn rejects_reference_to_unknown_decoder() {
+        let err = Config::parse(
+            r#"
+            [connection]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+            tls = false
+
+            [[topic]]
+            topic_filter = "devices/+/raw"
+            decoder = "does_not_exist"
+        "#,
+        );
+        assert!(matches!(
+            err,
+            Err(ConfigError::UnknownDecoderRef { topic_filter, decoder_ref })
+                if topic_filter == "devices/+/raw" && decoder_ref == "does_not_exist"
+        ));
+    }
+
+    #[test]
+    fn parses_inline_literal_decoder_on_topic() {
+        let config = Config::parse(
+            r#"
+            [connection]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+            tls = false
+
+            [[topic]]
+            topic_filter = "devices/+/raw"
+            decoder = { decoder = "utf8" }
+        "#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            config.topics[0].decoder,
+            Some(RefOr::Literal(DecoderConfig::Utf8))
+        ));
     }
 
     #[test]

@@ -37,7 +37,15 @@ async fn main() -> anyhow::Result<()> {
 
     let mut builder = DecoderRegistryBuilder::new();
     for mapping in &config.topics {
-        let decoder = mapping.decoder.build(&base_dir).with_context(|| {
+        // No decoder assigned means the topic is subscribe-only: still subscribed below, just
+        // never decoded/republished.
+        let Some(decoder_ref) = mapping.decoder.as_ref() else {
+            continue;
+        };
+        let decoder_config = decoder_ref
+            .resolve(&config.decoders)
+            .expect("decoder reference validated at config load");
+        let decoder = decoder_config.build(&base_dir).with_context(|| {
             format!(
                 "building decoder for topic_filter {:?}",
                 mapping.topic_filter

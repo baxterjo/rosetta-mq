@@ -13,7 +13,7 @@ use tokio::time::timeout;
 
 use rosetta_mq::auth::ResolvedAuth;
 use rosetta_mq::client::{Client, ConnectionConfig};
-use rosetta_mq::config::{Config, PipelineConfig, TopicMapping};
+use rosetta_mq::config::{Config, PipelineConfig, RefOr, TopicMapping};
 use rosetta_mq::decoder::protobuf::ProtobufConfig;
 use rosetta_mq::decoder::template::TemplateConfig;
 use rosetta_mq::decoder::{
@@ -167,23 +167,18 @@ async fn subscribe_decode_republish_end_to_end() {
         topics: vec![
             TopicMapping {
                 topic_filter: "devices/+/raw".to_string(),
-                decoder: DecoderConfig::Utf8,
+                decoder: Some(RefOr::Literal(DecoderConfig::Utf8)),
             },
             TopicMapping {
                 topic_filter: "sensors/#".to_string(),
-                decoder: DecoderConfig::Hexdump,
+                decoder: Some(RefOr::Literal(DecoderConfig::Hexdump)),
             },
         ],
+        decoders: HashMap::new(),
         pipeline: PipelineConfig::default(),
     };
 
-    let mut builder = DecoderRegistryBuilder::new();
-    for mapping in &app_config.topics {
-        let decoder = mapping.decoder.build(Path::new(".")).unwrap();
-        let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
-        builder.register(filter, decoder).unwrap();
-    }
-    let registry = builder.build();
+    let registry = build_registry(&app_config, Path::new("."));
 
     let conn = Client::connect(&app_config.connection, &ResolvedAuth::None).unwrap();
     Client::subscribe_all(
@@ -342,22 +337,17 @@ async fn protobuf_decoder_end_to_end() {
         },
         topics: vec![TopicMapping {
             topic_filter: "devices/+/proto".to_string(),
-            decoder: DecoderConfig::Protobuf(ProtobufConfig {
+            decoder: Some(RefOr::Literal(DecoderConfig::Protobuf(ProtobufConfig {
                 proto_file: PROTO_FIXTURE.to_string(),
                 message_type: "device.v1.DeviceReading".to_string(),
                 include_paths: vec![FIXTURES_DIR.to_string()],
-            }),
+            }))),
         }],
+        decoders: HashMap::new(),
         pipeline: PipelineConfig::default(),
     };
 
-    let mut builder = DecoderRegistryBuilder::new();
-    for mapping in &app_config.topics {
-        let decoder = mapping.decoder.build(Path::new(".")).unwrap();
-        let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
-        builder.register(filter, decoder).unwrap();
-    }
-    let registry = builder.build();
+    let registry = build_registry(&app_config, Path::new("."));
 
     let conn = Client::connect(&app_config.connection, &ResolvedAuth::None).unwrap();
     Client::subscribe_all(
@@ -462,23 +452,18 @@ async fn template_decoder_end_to_end() {
         },
         topics: vec![TopicMapping {
             topic_filter: "devices/+/raw".to_string(),
-            decoder: DecoderConfig::Template(TemplateConfig {
+            decoder: Some(RefOr::Literal(DecoderConfig::Template(TemplateConfig {
                 template:
                     "{{ payload.device_id }} reads {{ payload.temperature_c }}C on {{ topic }}"
                         .to_string(),
                 ..Default::default()
-            }),
+            }))),
         }],
+        decoders: HashMap::new(),
         pipeline: PipelineConfig::default(),
     };
 
-    let mut builder = DecoderRegistryBuilder::new();
-    for mapping in &app_config.topics {
-        let decoder = mapping.decoder.build(Path::new(".")).unwrap();
-        let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
-        builder.register(filter, decoder).unwrap();
-    }
-    let registry = builder.build();
+    let registry = build_registry(&app_config, Path::new("."));
 
     let conn = Client::connect(&app_config.connection, &ResolvedAuth::None).unwrap();
     Client::subscribe_all(
@@ -572,18 +557,13 @@ async fn websocket_end_to_end() {
         },
         topics: vec![TopicMapping {
             topic_filter: "devices/+/raw".to_string(),
-            decoder: DecoderConfig::Utf8,
+            decoder: Some(RefOr::Literal(DecoderConfig::Utf8)),
         }],
+        decoders: HashMap::new(),
         pipeline: PipelineConfig::default(),
     };
 
-    let mut builder = DecoderRegistryBuilder::new();
-    for mapping in &app_config.topics {
-        let decoder = mapping.decoder.build(Path::new(".")).unwrap();
-        let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
-        builder.register(filter, decoder).unwrap();
-    }
-    let registry = builder.build();
+    let registry = build_registry(&app_config, Path::new("."));
 
     let conn = Client::connect(&app_config.connection, &ResolvedAuth::None).unwrap();
     Client::subscribe_all(
@@ -905,4 +885,24 @@ async fn graceful_shutdown_drains_in_flight_task_before_returning() {
         .expect("decoded message was dropped instead of drained on shutdown")
         .expect("channel closed");
     assert_eq!(topic, "shutdown/1/decoded");
+}
+
+/// Mirrors the registry-building loop in `main.rs`: skips topics with no decoder assigned,
+/// resolves named/inline decoder refs, and registers the rest. Shared across the tests above
+/// since each builds its own `Config` by hand rather than loading one from TOML.
+fn build_registry(config: &Config, base_dir: &Path) -> rosetta_mq::decoder::DecoderRegistry {
+    let mut builder = DecoderRegistryBuilder::new();
+    for mapping in &config.topics {
+        let Some(decoder_ref) = mapping.decoder.as_ref() else {
+            continue;
+        };
+        let decoder = decoder_ref
+            .resolve(&config.decoders)
+            .expect("test config decoder ref must resolve")
+            .build(base_dir)
+            .unwrap();
+        let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
+        builder.register(filter, decoder).unwrap();
+    }
+    builder.build()
 }

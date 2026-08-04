@@ -162,7 +162,7 @@ where
 /// [`protobuf::ProtobufConfig`]). Lives here rather than in `config.rs` because it's
 /// decoder-specific domain knowledge, the same way `config.rs` already depends on
 /// [`crate::topic::TopicFilter`] rather than redefining topic-filter parsing itself.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "decoder")]
 pub enum DecoderConfig {
     #[serde(rename = "hexdump")]

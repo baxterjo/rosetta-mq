@@ -4,16 +4,13 @@ port = 1883
 client_id = "rosetta-mq"
 tls = false
 
-[[topic]]
-topic_filter = "devices/+/raw"
+[decoder.utf8]
 decoder = "utf8"
 
-[[topic]]
-topic_filter = "sensors/#"
+[decoder.hex]
 decoder = "hexdump"
 
-[[topic]]
-topic_filter = "sensors/proto/#"
+[decoder.device_proto]
 decoder = "protobuf"
 proto_file = "../protobuf/device.proto"
 message_type = "device.v1.DeviceReading"
@@ -21,9 +18,29 @@ message_type = "device.v1.DeviceReading"
 # covering both directories, not just device.proto's own parent.
 include_paths = [".."]
 
-[[topic]]
-topic_filter = "devices/+/json"
+[decoder.json_template]
 decoder = "template"
 template = """
 {{ topic }}: {{ payload.device_id }} is {{ payload.temperature_c }}C
 """
+
+[[topic]]
+topic_filter = "devices/+/raw"
+decoder = "utf8"
+
+[[topic]]
+topic_filter = "sensors/#"
+decoder = "hex"
+
+[[topic]]
+topic_filter = "sensors/proto/#"
+decoder = "device_proto"
+
+[[topic]]
+topic_filter = "devices/+/json"
+decoder = "json_template"
+
+[[topic]]
+topic_filter = "devices/+/status"
+# No `decoder` -- rosetta-mq subscribes so any other MQTT client can see this traffic, but
+# doesn't decode or republish it.
