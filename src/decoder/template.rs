@@ -11,12 +11,8 @@ use crate::decoder::{DecodeError, DecodePublish, Decoder};
 /// user-facing, just an internal key into the `minijinja::Environment`.
 const TEMPLATE_NAME: &str = "message";
 
-/// Mirrors `minijinja::UndefinedBehavior` for TOML config -- `minijinja`'s own type doesn't
-/// implement `Deserialize`, so this is what `undefined_behavior` in config actually deserializes
-/// into, then gets converted via `From` below. See `minijinja::UndefinedBehavior`'s own docs for
-/// exact per-variant semantics (printing/iteration/attribute-access/truthiness); `Strict` is the
-/// default here to match this project's "never silently produce a misleading result" posture for
-/// a debugging tool -- a typo'd field name should surface as a decode failure, not blank output.
+/// Mirrors [`minijinja::UndefinedBehavior`] for TOML config. See [`minijinja::UndefinedBehavior`]'s own docs for
+/// exact per-variant semantics (printing/iteration/attribute-access/truthiness).
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UndefinedBehavior {
@@ -56,11 +52,12 @@ pub enum TemplateDecoderError {
 }
 
 /// Renders an incoming publish through a user-authored Jinja2-compatible template (via
-/// `minijinja`). The template gets the whole `Publish` packet as context (`topic`, `qos`,
+/// [`minijinja`]). The template gets the whole `Publish` packet as context (`topic`, `qos`,
 /// `retain`, `dup`, `pkid`), plus `payload`: parsed and indexable (`payload.field`, `payload[0]`,
 /// ...) when the payload is JSON, otherwise a plain string, or a hex string when the payload
 /// isn't even valid UTF-8. Undefined references (a missing JSON field, indexing into a non-JSON
-/// payload, a typo'd variable name) are a hard render error rather than blank output.
+/// payload, a typo'd variable name) are a hard render error rather than blank output by default
+/// -- configurable per topic via [`TemplateConfig::undefined_behavior`].
 #[derive(Debug)]
 pub struct TemplateDecoder {
     env: Environment<'static>,

@@ -159,13 +159,12 @@ For `"template"`:
   (`{{ payload.device_id }}`, `{{ payload[0] }}`, ...); if it's valid UTF-8
   text but not JSON, `payload` is that text as a plain string; otherwise
   `payload` is the raw bytes hex-encoded as a string.
-- Referencing a field that doesn't exist — a missing JSON key, indexing into
-  a payload that isn't JSON, or a typo'd variable name — is a decode failure,
-  not blank output, by default. Like any other decode failure, it's still
-  republished (to `.../decode_error`, with the render error and the raw
-  payload as hex) rather than silently dropped.
-- `undefined_behavior` — optional, defaults to `"strict"`. Controls how
-  undefined references (above) are handled:
+- `undefined_behavior` — optional, defaults to `"strict"`. Controls what
+  happens when a template references something undefined — a missing JSON
+  key, indexing into a payload that isn't JSON, a typo'd variable name. Where
+  the table below says "decode failure", that's treated like any other
+  decode failure: republished (to `.../decode_error`, with the render error
+  and the raw payload as hex) rather than silently dropped.
   | Value              | Behavior                                                            |
   |--------------------|----------------------------------------------------------------------|
   | `"strict"`         | Any use of an undefined value (printing, iterating, attribute access, truthiness) is a decode failure. |
