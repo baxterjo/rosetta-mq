@@ -20,3 +20,10 @@ message_type = "device.v1.DeviceReading"
 # device.proto imports common/status.proto, a sibling of protobuf/ -- needs an include path
 # covering both directories, not just device.proto's own parent.
 include_paths = [".."]
+
+[[topic]]
+topic_filter = "devices/+/json"
+decoder = "template"
+template = """
+{{ topic }}: {{ payload.device_id }} is {{ payload.temperature_c }}C
+"""

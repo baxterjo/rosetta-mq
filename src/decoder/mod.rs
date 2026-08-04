@@ -11,6 +11,7 @@ use tokio::sync::mpsc::{error::SendError, Sender};
 
 pub mod builtin;
 pub mod protobuf;
+pub mod template;
 
 #[derive(Debug, Error)]
 pub enum DecodeError<E: Error> {
@@ -167,6 +168,8 @@ pub enum DecoderConfig {
     Utf8,
     #[serde(rename = "protobuf")]
     Protobuf(protobuf::ProtobufConfig),
+    #[serde(rename = "template")]
+    Template(template::TemplateConfig),
 }
 
 impl DecoderConfig {
@@ -181,6 +184,9 @@ impl DecoderConfig {
             DecoderConfig::Protobuf(cfg) => Ok(Arc::new(protobuf::ProtobufDecoder::from_config(
                 cfg, base_dir,
             )?)),
+            DecoderConfig::Template(cfg) => {
+                Ok(Arc::new(template::TemplateDecoder::from_config(cfg)?))
+            }
         }
     }
 }
@@ -189,6 +195,8 @@ impl DecoderConfig {
 pub enum BuildDecoderError {
     #[error(transparent)]
     Protobuf(#[from] protobuf::ProtobufDecoderError),
+    #[error(transparent)]
+    Template(#[from] template::TemplateDecoderError),
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

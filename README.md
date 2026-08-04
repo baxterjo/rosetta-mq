@@ -51,6 +51,13 @@ message_type = "device.v1.DeviceReading"
 # Only needed if device.proto imports another .proto that isn't a sibling of
 # proto_file itself -- extra directories to search when resolving imports.
 include_paths = ["schemas/common"]
+
+[[topic]]
+topic_filter = "devices/+/json"
+decoder = "template"
+template = """
+{{ topic }}: {{ payload.device_id }} is {{ payload.temperature_c }}C
+"""
 ```
 
 ### `[broker]`
@@ -129,6 +136,7 @@ Built-in decoders:
 | `"utf8"`     | —                                                                              | Decodes the payload as UTF-8 text. (Mostly used for testing)                |
 | `"hexdump"`  | —                                                                              | Renders the raw payload bytes as hex.             |
 | `"protobuf"` | `proto_file`, `message_type`, `include_paths` (optional)                     | Decodes a Protobuf payload to JSON using a schema.|
+| `"template"` | `template`                                                                    | Renders the message through a user-authored Jinja2-compatible template.|
 
 For `"protobuf"`:
 - `proto_file` — path to the `.proto` file defining the message, resolved
@@ -139,6 +147,23 @@ For `"protobuf"`:
   resolving `import`s in the schema, also resolved relative to the config
   file's directory. `proto_file`'s own directory is always searched; this is
   only needed for imports that live elsewhere.
+
+For `"template"`:
+- `template` — the template text itself, written inline in the config
+  (typically as a TOML triple-quoted string). Syntax is Jinja2-compatible,
+  via the [`minijinja`](https://docs.rs/minijinja) engine.
+- The template has access to every field of the incoming MQTT packet:
+  `topic`, `qos`, `retain`, `dup`, and `pkid`.
+- `payload` is also available and adapts to the payload's content: if it's
+  valid JSON, `payload` is the parsed value and can be indexed
+  (`{{ payload.device_id }}`, `{{ payload[0] }}`, ...); if it's valid UTF-8
+  text but not JSON, `payload` is that text as a plain string; otherwise
+  `payload` is the raw bytes hex-encoded as a string.
+- Referencing a field that doesn't exist — a missing JSON key, indexing into
+  a payload that isn't JSON, or a typo'd variable name — is a decode failure,
+  not blank output. Like any other decode failure, it's still republished
+  (to `.../decode_error`, with the render error and the raw payload as hex)
+  rather than silently dropped.
 
 ### `[pipeline]`
 

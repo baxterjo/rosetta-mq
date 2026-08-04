@@ -3,7 +3,7 @@
 #   just broker      # 1: local mosquitto broker
 #   just run         # 2: rosetta-mq against rosetta-mq.toml
 #   just watch       # 3: see every raw/decoded/decode_error message go by
-#   just pub-utf8 / just pub-hex / just pub-proto / just pub-invalid   # 4: publish test messages
+#   just pub-utf8 / just pub-hex / just pub-proto / just pub-template / just pub-invalid   # 4: publish test messages
 
 # Start a local mosquitto broker on 127.0.0.1:1883 (anonymous access, foreground).
 broker:
@@ -16,6 +16,10 @@ run:
 # Run tests using cargo-nextest
 test:
   cargo nextest run
+
+# Run coverage report
+coverage:
+  cargo llvm-cov --html --open nextest
 
 # Watch every message on the broker -- raw input alongside its decoded/decode_error output.
 watch:
@@ -33,6 +37,11 @@ pub-hex message="sensor-payload":
 # sensors/proto/#. Encoded via the `encode_device_reading` example, so no `protoc` is needed.
 pub-proto:
     cargo run --quiet --example encode_device_reading | mosquitto_pub -h 127.0.0.1 -t sensors/proto/reading -s
+
+# Publish a JSON payload -- exercises the `template` decoder on devices/+/json, indexing into
+# the parsed payload from the template.
+pub-template:
+    mosquitto_pub -h 127.0.0.1 -t devices/42/json -m '{"device_id": "sensor-42", "temperature_c": 21.5}'
 
 # Publish invalid UTF-8 -- exercises the never-drop-silently error-annotated republish path.
 pub-invalid:
