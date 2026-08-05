@@ -1,21 +1,24 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::{error::Error, path::Path};
 
-use rumqttc::{AsyncClient, ClientError, Publish};
+use rumqttc::Publish;
 use serde::Deserialize;
 use thiserror::Error;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc::{error::SendError, Sender};
 
+pub mod context;
 pub mod hexdump;
 pub mod protobuf;
 pub mod registry;
 pub mod template;
 pub mod utf8;
 
-pub use registry::{DecoderRegistry, DecoderRegistryBuilder, RegistryError};
+pub use registry::{DecoderRegistry, DecoderRegistryBuilder, RegistryEntry, RegistryError};
 
+use context::CompiledTemplate;
 use crate::config::RefOr;
 
 //  _____ ____  _   _ ______ _____ _____
@@ -25,6 +28,13 @@ use crate::config::RefOr;
 //| |___| |__| | |\  | |     _| || |__| |
 // \_____\____/|_| \_|_|    |_____\_____|
 
+/// Always deserializes successfully on its own -- `success_output`/`error_output` have defaults
+/// and `decoder` is `Option` -- so it's safe to flatten directly onto `TopicMapping` without the
+/// `flatten` + `Option<Struct>` footgun that comes from wrapping the whole thing in `Option`
+/// instead (a deserialize failure partway through a flattened `Option<T>` silently becomes `None`
+/// rather than propagating, since serde/toml can't tell "absent" apart from "present but
+/// invalid" once the struct itself is optional -- see the regression test below). `decoder` being
+/// `None` is what actually means "no decoder assigned, subscribe-only".
 #[derive(Debug, Clone, Deserialize)]
 pub struct DecoderConfig {
     /// What should happen when the decoder succeeds?
@@ -32,17 +42,61 @@ pub struct DecoderConfig {
     pub success_output: OutputBehavior,
     #[serde(default = "default_error_behavior")]
     pub error_output: OutputBehavior,
-    pub decoder: RefOr<DecoderKind>,
+    pub decoder: Option<RefOr<DecoderKind>>,
+}
+
+/// The result of [`DecoderConfig::build`]: a ready-to-use decoder plus its two output behaviors,
+/// already resolved from config -- both are ready to use as-is at message time, since only a
+/// codec (e.g. a `.proto` schema) needs a build step; output routing doesn't.
+pub struct BuiltDecoder {
+    pub decoder: Arc<dyn ErasedDecoder>,
+    pub success_output: OutputBehavior,
+    pub error_output: OutputBehavior,
+}
+
+impl DecoderConfig {
+    /// Resolves the inner `decoder` ref against `decoders` and builds the codec it names (see
+    /// [`DecoderKind::build`]), bundling the result with this mapping's output behaviors. Only
+    /// meaningful to call when `self.decoder` is `Some` (i.e. a decoder is actually configured for
+    /// this topic) -- callers check that first, the same way they already skip subscribe-only
+    /// topics before doing anything else with them. The ref is assumed already validated (see
+    /// `Config::validate`), so an unresolvable name here is a bug, not a user-facing error.
+    pub fn build(
+        &self,
+        base_dir: &Path,
+        decoders: &HashMap<String, DecoderKind>,
+    ) -> Result<BuiltDecoder, BuildDecoderError> {
+        let kind = self
+            .decoder
+            .as_ref()
+            .expect("only called when a decoder is configured")
+            .resolve(decoders)
+            .expect("decoder reference validated at config load");
+        Ok(BuiltDecoder {
+            decoder: kind.build(base_dir)?,
+            success_output: self.success_output.clone(),
+            error_output: self.error_output.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OutputBehavior {
+    /// Publish the decoder output using the provided args.
     Publish(PublishArgs),
+    /// Emit the decoder output to stdout
     StdOut,
+    /// Emit the decoder output to stderr
+    StdErr,
+    /// Run the decoder, but do not emit the decoder output anywhere.
     Quiet,
 }
 
-fn default_success_behavior() -> OutputBehavior {
+/// The default `success_output`: publish to `{topic}/decoded`. Public so code that constructs a
+/// `DecoderConfig` directly (rather than via TOML, where `#[serde(default = ...)]` already
+/// applies this) can reuse the same default -- e.g. tests.
+pub fn default_success_behavior() -> OutputBehavior {
     OutputBehavior::Publish(PublishArgs {
         topic: TopicSpec::Suffix("/decoded".to_string()),
         qos: InheritOr::Literal(QoS::AtMostOnce),
@@ -50,7 +104,9 @@ fn default_success_behavior() -> OutputBehavior {
     })
 }
 
-fn default_error_behavior() -> OutputBehavior {
+/// The default `error_output`: publish to `{topic}/decode_error`. See
+/// [`default_success_behavior`].
+pub fn default_error_behavior() -> OutputBehavior {
     OutputBehavior::Publish(PublishArgs {
         topic: TopicSpec::Suffix("/decode_error".to_string()),
         qos: InheritOr::Literal(QoS::AtMostOnce),
@@ -76,11 +132,42 @@ pub struct PublishArgs {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TopicSpec {
+    /// Always publish to this topic from this decoder.
     Literal(String),
+    /// Add a prefix to the original topic for this decoder.
     Prefix(String),
+    /// Add a suffix to the original topic for this decoder.
     Suffix(String),
-    Template(String),
+    /// Generate the topic from a given template string. The template will be given all the context
+    /// that the `template` decoder is given as well as the decoded output.
+    Template(CompiledTemplate),
+}
+
+impl TopicSpec {
+    /// Resolves this spec against the incoming message and the decoder's output payload for this
+    /// message. `Prefix`/`Suffix` concatenate directly against `incoming.topic` with no inserted
+    /// separator -- the configured string is expected to carry its own `/`, same as the default
+    /// `"/decoded"` suffix does.
+    pub fn resolve(
+        &self,
+        incoming: &Publish,
+        output_payload: &[u8],
+    ) -> Result<String, minijinja::Error> {
+        Ok(match self {
+            TopicSpec::Literal(topic) => topic.clone(),
+            TopicSpec::Prefix(prefix) => format!("{prefix}{}", incoming.topic),
+            TopicSpec::Suffix(suffix) => format!("{}{suffix}", incoming.topic),
+            TopicSpec::Template(template) => {
+                let ctx = context::publish_context(incoming);
+                template.render(minijinja::context! {
+                    output => context::payload_value(output_payload),
+                    ..ctx
+                })?
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Deserialize, Default)]
@@ -101,6 +188,16 @@ impl From<QoS> for rumqttc::QoS {
     }
 }
 
+impl From<rumqttc::QoS> for QoS {
+    fn from(value: rumqttc::QoS) -> Self {
+        match value {
+            rumqttc::QoS::AtMostOnce => Self::AtMostOnce,
+            rumqttc::QoS::AtLeastOnce => Self::AtLeastOnce,
+            rumqttc::QoS::ExactlyOnce => Self::ExactlyOnce,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum InheritOr<T> {
@@ -111,6 +208,16 @@ pub enum InheritOr<T> {
 impl<T: Default> Default for InheritOr<T> {
     fn default() -> Self {
         InheritOr::Literal(T::default())
+    }
+}
+
+impl<T> InheritOr<T> {
+    /// Resolves to `inherited` for `Inherit`, or the configured value for `Literal`.
+    pub fn resolve(self, inherited: T) -> T {
+        match self {
+            InheritOr::Inherit => inherited,
+            InheritOr::Literal(value) => value,
+        }
     }
 }
 
@@ -144,9 +251,7 @@ impl DecoderKind {
             DecoderKind::Protobuf(cfg) => Ok(Arc::new(protobuf::ProtobufDecoder::from_config(
                 cfg, base_dir,
             )?)),
-            DecoderKind::Template(cfg) => {
-                Ok(Arc::new(template::TemplateDecoder::from_config(cfg)?))
-            }
+            DecoderKind::Template(cfg) => Ok(Arc::new(template::TemplateDecoder::from_config(cfg))),
         }
     }
 }
@@ -187,8 +292,6 @@ impl<E: Error + Send + Sync + 'static> DecodeError<E> {
 pub enum BuildDecoderError {
     #[error(transparent)]
     Protobuf(#[from] protobuf::ProtobufDecoderError),
-    #[error(transparent)]
-    Template(#[from] template::TemplateDecoderError),
 }
 
 /// Type-erased decoder error, used at the [`Decoder`] trait-object boundary in place of the
@@ -281,45 +384,11 @@ where
 
 /// Decoders will emit this to a channel whenever they want to publish a new message.
 ///
-/// Many decoders will only emit one of these, but some may emit a stream.
-///
-/// The optional fields will be resolved
+/// Many decoders will only emit one of these, but some may emit a stream. Where (and whether)
+/// each emitted payload actually gets published is entirely config-driven (see
+/// [`OutputBehavior`]/[`PublishArgs`]) -- decoders themselves never choose their own output topic,
+/// QoS, or retain flag.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DecodePublish {
-    pub topic: Option<String>,
-    pub qos: Option<rumqttc::QoS>,
-    pub retain: Option<bool>,
     pub payload: Vec<u8>,
-}
-
-impl DecodePublish {
-    /// Resolves missing publish arguments using the values already present in `incoming` and
-    /// publishes using `client`.
-    pub async fn publish(self, incoming: Publish, client: &AsyncClient) -> Result<(), ClientError> {
-        self.resolve(incoming).publish(client).await
-    }
-
-    fn resolve(self, incoming: Publish) -> ResolvedDecodePublish {
-        ResolvedDecodePublish {
-            topic: self.topic.unwrap_or(format!("{}/decoded", incoming.topic)),
-            qos: self.qos.unwrap_or(incoming.qos),
-            retain: self.retain.unwrap_or(incoming.retain),
-            payload: self.payload.into(),
-        }
-    }
-}
-
-pub struct ResolvedDecodePublish {
-    pub topic: String,
-    pub qos: rumqttc::QoS,
-    pub retain: bool,
-    pub payload: Vec<u8>,
-}
-
-impl ResolvedDecodePublish {
-    async fn publish(self, client: &AsyncClient) -> Result<(), ClientError> {
-        client
-            .publish(self.topic, self.qos, self.retain, self.payload)
-            .await
-    }
 }

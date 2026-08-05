@@ -14,10 +14,12 @@ use tokio::time::timeout;
 use rosetta_mq::auth::ResolvedAuth;
 use rosetta_mq::client::{Client, ConnectionConfig};
 use rosetta_mq::config::{Config, RefOr, TopicMapping};
+use rosetta_mq::decoder::context::CompiledTemplate;
 use rosetta_mq::decoder::protobuf::ProtobufConfig;
 use rosetta_mq::decoder::template::TemplateConfig;
 use rosetta_mq::decoder::{
-    DecodeError, DecodePublish, Decoder, DecoderConfig, DecoderRegistryBuilder,
+    default_error_behavior, default_success_behavior, DecodeError, DecodePublish, Decoder,
+    DecoderConfig, DecoderKind, DecoderRegistryBuilder, OutputBehavior, PublishArgs, TopicSpec,
 };
 use rosetta_mq::engine;
 use rosetta_mq::engine::EngineConfig;
@@ -31,6 +33,7 @@ const WEBSOCKET_TEST_PORT: u16 = 18888;
 const CONCURRENCY_TEST_PORT: u16 = 18889;
 const SHUTDOWN_TEST_PORT: u16 = 18890;
 const TEMPLATE_TEST_PORT: u16 = 18891;
+const PIPELINE_TEST_PORT: u16 = 18892;
 const PROTO_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/protobuf/device.proto"
@@ -126,6 +129,17 @@ fn rumqttd_ws_config(port: u16) -> rumqttd::Config {
     }
 }
 
+/// A `DecoderConfig` wrapping `kind` with the same success/error output defaults TOML would apply
+/// via `#[serde(default = ...)]` -- for tests that build a `Config` by hand rather than parsing
+/// TOML, where those defaults don't kick in automatically.
+fn default_decoder(kind: DecoderKind) -> DecoderConfig {
+    DecoderConfig {
+        success_output: default_success_behavior(),
+        error_output: default_error_behavior(),
+        decoder: Some(RefOr::Literal(kind)),
+    }
+}
+
 async fn wait_for_port(port: u16) {
     let addr = format!("127.0.0.1:{port}");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -168,11 +182,11 @@ async fn subscribe_decode_republish_end_to_end() {
         topics: vec![
             TopicMapping {
                 topic_filter: "devices/+/raw".to_string(),
-                decoder: Some(RefOr::Literal(DecoderConfig::Utf8)),
+                decoder: default_decoder(DecoderKind::Utf8),
             },
             TopicMapping {
                 topic_filter: "sensors/#".to_string(),
-                decoder: Some(RefOr::Literal(DecoderConfig::Hexdump)),
+                decoder: default_decoder(DecoderKind::Hexdump),
             },
         ],
         decoders: HashMap::new(),
@@ -314,6 +328,145 @@ async fn subscribe_decode_republish_end_to_end() {
     );
 }
 
+/// Proves the self-echo guard is scoped per registry entry, not shared registry-wide: decoder A's
+/// `success_output` is configured to publish onto `pipeline/stage2`, which is also decoder B's
+/// `topic_filter` -- an intentional decode pipeline chained through the broker. If the guard were
+/// global (e.g. the old blanket "topic ends in /decoded" check this replaces), there'd be no way
+/// to tell A's own past output apart from legitimate new input for B. Since the guard lives on
+/// A's entry alone, B's entry has no record of that topic and processes it normally.
+#[tokio::test]
+async fn chained_decoder_pipeline_hop_is_not_suppressed_by_self_echo_guard() {
+    let broker_config = rumqttd_config(PIPELINE_TEST_PORT);
+    std::thread::spawn(move || {
+        let mut broker = rumqttd::Broker::new(broker_config);
+        let _ = broker.start();
+    });
+    wait_for_port(PIPELINE_TEST_PORT).await;
+
+    let app_config = Config {
+        connection: ConnectionConfig {
+            host: "127.0.0.1".to_string(),
+            port: PIPELINE_TEST_PORT,
+            client_id: "rosetta-mq-pipeline-test".to_string(),
+            auth: None,
+            tls: false,
+            protocol: Protocol::Mqtt,
+            allow_self_signed_certs: false,
+        },
+        topics: vec![
+            TopicMapping {
+                topic_filter: "pipeline/raw".to_string(),
+                decoder: DecoderConfig {
+                    success_output: OutputBehavior::Publish(PublishArgs {
+                        topic: TopicSpec::Literal("pipeline/stage2".to_string()),
+                        qos: Default::default(),
+                        retain: Default::default(),
+                    }),
+                    error_output: default_error_behavior(),
+                    decoder: Some(RefOr::Literal(DecoderKind::Utf8)),
+                },
+            },
+            TopicMapping {
+                topic_filter: "pipeline/stage2".to_string(),
+                decoder: default_decoder(DecoderKind::Hexdump),
+            },
+        ],
+        decoders: HashMap::new(),
+        engine: EngineConfig::default(),
+    };
+
+    let registry = build_registry(&app_config, Path::new("."));
+
+    let conn = Client::connect(&app_config.connection, &ResolvedAuth::None).unwrap();
+    Client::subscribe_all(
+        &conn.client,
+        app_config.topics.iter().map(|t| t.topic_filter.as_str()),
+    )
+    .await
+    .unwrap();
+
+    let engine_client = conn.client.clone();
+    tokio::spawn(engine::run(
+        conn.incoming,
+        engine_client,
+        registry,
+        app_config.engine.max_concurrent_decodes,
+        CancellationToken::new(),
+    ));
+
+    let mut options = MqttOptions::new("test-observer-pipeline", "127.0.0.1", PIPELINE_TEST_PORT);
+    options.set_keep_alive(Duration::from_secs(30));
+    let (test_client, mut test_eventloop) = AsyncClient::new(options, 100);
+
+    let (tx, mut rx) = mpsc::channel(10);
+    tokio::spawn(async move {
+        loop {
+            match test_eventloop.poll().await {
+                Ok(Event::Incoming(Packet::Publish(publish))) => {
+                    if tx
+                        .send((publish.topic, publish.payload.to_vec()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    test_client
+        .subscribe("pipeline/#", QoS::AtLeastOnce)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    test_client
+        .publish("pipeline/raw", QoS::AtLeastOnce, false, "hello pipeline")
+        .await
+        .unwrap();
+
+    // Our own publish to `pipeline/raw`, echoed back since we're subscribed via `pipeline/#`.
+    let (echo_topic, _) = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for raw echo")
+        .expect("channel closed");
+    assert_eq!(echo_topic, "pipeline/raw");
+
+    // Decoder A's output, landing on `pipeline/stage2` -- also decoder B's input filter.
+    let (topic, payload) = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for stage2 hop")
+        .expect("channel closed");
+    assert_eq!(topic, "pipeline/stage2");
+    assert_eq!(String::from_utf8(payload).unwrap(), "hello pipeline");
+
+    // Decoder B must still process that hop.
+    let (topic, payload) = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for stage2 decoded output")
+        .expect("channel closed");
+    assert_eq!(topic, "pipeline/stage2/decoded");
+    assert_eq!(
+        String::from_utf8(payload).unwrap(),
+        format!(
+            "{} ({} bytes)",
+            hex::encode("hello pipeline"),
+            "hello pipeline".len()
+        )
+    );
+
+    // No feedback loop beyond that single hop.
+    let extra = timeout(Duration::from_millis(500), rx.recv()).await;
+    assert!(
+        extra.is_err(),
+        "expected no further messages, but got: {extra:?}"
+    );
+}
+
 /// End-to-end coverage for the runtime-schema protobuf decoder: a real broker, a topic mapping
 /// pointing at the fixture `.proto`, and real encoded wire bytes -- proving `.proto` compilation,
 /// dynamic decode, and JSON republish all work together, not just each in isolation.
@@ -338,11 +491,11 @@ async fn protobuf_decoder_end_to_end() {
         },
         topics: vec![TopicMapping {
             topic_filter: "devices/+/proto".to_string(),
-            decoder: Some(RefOr::Literal(DecoderConfig::Protobuf(ProtobufConfig {
+            decoder: default_decoder(DecoderKind::Protobuf(ProtobufConfig {
                 proto_file: PROTO_FIXTURE.to_string(),
                 message_type: "device.v1.DeviceReading".to_string(),
                 include_paths: vec![FIXTURES_DIR.to_string()],
-            }))),
+            })),
         }],
         decoders: HashMap::new(),
         engine: EngineConfig::default(),
@@ -453,12 +606,13 @@ async fn template_decoder_end_to_end() {
         },
         topics: vec![TopicMapping {
             topic_filter: "devices/+/raw".to_string(),
-            decoder: Some(RefOr::Literal(DecoderConfig::Template(TemplateConfig {
-                template:
-                    "{{ payload.device_id }} reads {{ payload.temperature_c }}C on {{ topic }}"
-                        .to_string(),
-                ..Default::default()
-            }))),
+            decoder: default_decoder(DecoderKind::Template(TemplateConfig {
+                template: CompiledTemplate::new(
+                    "{{ payload.device_id }} reads {{ payload.temperature_c }}C on {{ topic }}",
+                )
+                .unwrap(),
+                undefined_behavior: Default::default(),
+            })),
         }],
         decoders: HashMap::new(),
         engine: EngineConfig::default(),
@@ -558,7 +712,7 @@ async fn websocket_end_to_end() {
         },
         topics: vec![TopicMapping {
             topic_filter: "devices/+/raw".to_string(),
-            decoder: Some(RefOr::Literal(DecoderConfig::Utf8)),
+            decoder: default_decoder(DecoderKind::Utf8),
         }],
         decoders: HashMap::new(),
         engine: EngineConfig::default(),
@@ -701,6 +855,8 @@ async fn bounded_concurrent_decoding() {
                 peak: Arc::clone(&peak),
                 delay,
             }),
+            default_success_behavior(),
+            default_error_behavior(),
         )
         .unwrap();
     let registry = builder.build();
@@ -812,6 +968,8 @@ async fn graceful_shutdown_drains_in_flight_task_before_returning() {
                 peak,
                 delay: decode_delay,
             }),
+            default_success_behavior(),
+            default_error_behavior(),
         )
         .unwrap();
     let registry = builder.build();
@@ -894,16 +1052,14 @@ async fn graceful_shutdown_drains_in_flight_task_before_returning() {
 fn build_registry(config: &Config, base_dir: &Path) -> rosetta_mq::decoder::DecoderRegistry {
     let mut builder = DecoderRegistryBuilder::new();
     for mapping in &config.topics {
-        let Some(decoder_ref) = mapping.decoder.as_ref() else {
+        if mapping.decoder.decoder.is_none() {
             continue;
-        };
-        let decoder = decoder_ref
-            .resolve(&config.decoders)
-            .expect("test config decoder ref must resolve")
-            .build(base_dir)
-            .unwrap();
+        }
+        let built = mapping.decoder.build(base_dir, &config.decoders).unwrap();
         let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
-        builder.register(filter, decoder).unwrap();
+        builder
+            .register(filter, built.decoder, built.success_output, built.error_output)
+            .unwrap();
     }
     builder.build()
 }
