@@ -1,8 +1,9 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
+use tracing::warn;
 
 use crate::topic::TopicFilter;
 
@@ -27,7 +28,7 @@ pub struct RegistryEntry {
     pub error_output: OutputBehavior,
     // Keeps track of previously sent messages on a specific topic to avoid feedback loops
     // (echoes).
-    pending_echoes: Mutex<HashMap<String, VecDeque<Instant>>>,
+    pending_echoes: RwLock<HashMap<String, VecDeque<Instant>>>,
 }
 
 impl RegistryEntry {
@@ -39,10 +40,16 @@ impl RegistryEntry {
         if !self.filter.matches(topic) {
             return;
         }
+        warn!(
+            decoder = self.name,
+            topic_filter = self.filter.as_str(),
+            published_topic = topic,
+            "Decoder published a packet that it will receive again"
+        );
         let mut pending = self
             .pending_echoes
-            .lock()
-            .expect("poisoned mutex should panic");
+            .write()
+            .expect("poisoned rwlock should panic");
         prune_expired(&mut pending);
         pending
             .entry(topic.to_string())
@@ -53,10 +60,22 @@ impl RegistryEntry {
     /// If `topic` has a pending self-published mark, consumes the oldest one and returns `true`
     /// (this message is our own echo, not new input); otherwise returns `false`.
     pub fn consume_echo(&self, topic: &str) -> bool {
+        // First check if there is a live mark in pending echoes under a read lock. This prevents
+        // correctly configured decoders from incurring a heavy performance overhead.
+        {
+            let pending = self
+                .pending_echoes
+                .read()
+                .expect("poisoned rwlock should panic");
+            if !has_live_mark(&pending, topic) {
+                return false;
+            }
+        }
+        // If a live mark exists for the topic, THEN request a write lock and run the normal operations.
         let mut pending = self
             .pending_echoes
-            .lock()
-            .expect("poisoned mutex should panic");
+            .write()
+            .expect("poisoned rwlock should panic");
         prune_expired(&mut pending);
         let Some(marks) = pending.get_mut(topic) else {
             return false;
@@ -67,6 +86,17 @@ impl RegistryEntry {
         }
         consumed
     }
+}
+
+/// Whether `topic` has at least one mark that isn't older than [`PENDING_ECHO_TTL`], without
+/// mutating anything -- safe to call under a read lock. Marks within a topic are oldest-first, so
+/// it's enough to check the newest (`back`): if even that one is expired, all of them are.
+fn has_live_mark(pending: &HashMap<String, VecDeque<Instant>>, topic: &str) -> bool {
+    let now = Instant::now();
+    pending
+        .get(topic)
+        .and_then(VecDeque::back)
+        .is_some_and(|newest| now.saturating_duration_since(*newest) <= PENDING_ECHO_TTL)
 }
 
 /// Drops any pending mark older than [`PENDING_ECHO_TTL`], and any topic left with no marks at
@@ -114,7 +144,7 @@ impl DecoderRegistryBuilder {
             decoder,
             success_output,
             error_output,
-            pending_echoes: Mutex::new(HashMap::new()),
+            pending_echoes: RwLock::new(HashMap::new()),
         }));
         Ok(())
     }
@@ -323,5 +353,37 @@ mod tests {
         prune_expired(&mut pending);
 
         assert_eq!(pending.get("topic").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn has_live_mark_is_true_when_the_newest_mark_is_unexpired() {
+        let mut pending = HashMap::new();
+        // Oldest is stale, newest isn't -- has_live_mark only needs to check the newest.
+        pending.insert(
+            "topic".to_string(),
+            VecDeque::from([
+                Instant::now() - (PENDING_ECHO_TTL + Duration::from_secs(1)),
+                Instant::now(),
+            ]),
+        );
+
+        assert!(has_live_mark(&pending, "topic"));
+    }
+
+    #[test]
+    fn has_live_mark_is_false_when_every_mark_is_stale() {
+        let mut pending = HashMap::new();
+        pending.insert(
+            "topic".to_string(),
+            VecDeque::from([Instant::now() - (PENDING_ECHO_TTL + Duration::from_secs(1))]),
+        );
+
+        assert!(!has_live_mark(&pending, "topic"));
+    }
+
+    #[test]
+    fn has_live_mark_is_false_for_an_absent_topic() {
+        let pending = HashMap::new();
+        assert!(!has_live_mark(&pending, "topic"));
     }
 }
