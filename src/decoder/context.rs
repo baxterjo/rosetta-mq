@@ -1,25 +1,23 @@
-use minijinja::{Environment, Value, context};
+use minijinja::{context, Environment, Value};
 use rumqttc::Publish;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Never user-facing, just an internal key into each [`CompiledTemplate`]'s own
-/// `minijinja::Environment` -- every instance holds exactly one template, so there's no collision
-/// risk between instances.
+/// Internal key for indexing a template within a decoder's environment. There is only ever one
+/// template per environment so the same one is used every time.
 const TEMPLATE_NAME: &str = "message";
 
-/// A Jinja2-compatible template (via [`minijinja`]) that's compiled at construction time --
-/// either through [`CompiledTemplate::new`] or, via the [`Deserialize`] impl below, as soon as
-/// its source text is parsed out of the config. This is what lets a bad template in the config
-/// fail at config-load time rather than on the first message that happens to hit it.
+/// A newtype struct around a [`minijinja`] template. This struct and the (de)serialize impls below
+/// allow invalid templates to be flagged at init time.
 #[derive(Debug, Clone)]
 pub struct CompiledTemplate {
-    // Kept alongside `env` for `Serialize`/`Debug` -- minijinja doesn't hand a template's source
+    // Kept alongside `env` for `Serialize`/`Debug`. [`minijinja`] doesn't hand a template's source
     // text back out cheaply once compiled.
     source: String,
     env: Environment<'static>,
 }
 
 impl CompiledTemplate {
+    /// Generate a new template from an input string.
     pub fn new(source: impl Into<String>) -> Result<Self, minijinja::Error> {
         let source = source.into();
         let mut env = Environment::new();
@@ -27,6 +25,7 @@ impl CompiledTemplate {
         Ok(Self { source, env })
     }
 
+    /// Render a template from the given context.
     pub fn render(&self, ctx: impl Serialize) -> Result<String, minijinja::Error> {
         self.env
             .get_template(TEMPLATE_NAME)
@@ -34,10 +33,12 @@ impl CompiledTemplate {
             .render(ctx)
     }
 
+    /// Get the string that is the source of the template.
     pub fn source(&self) -> &str {
         &self.source
     }
 
+    /// Sets the undefined behavior for the template.
     pub(crate) fn set_undefined_behavior(&mut self, behavior: minijinja::UndefinedBehavior) {
         self.env.set_undefined_behavior(behavior);
     }
@@ -61,9 +62,7 @@ impl Serialize for CompiledTemplate {
     }
 }
 
-/// Builds the template-rendering context shared by the `template` decoder and by templated
-/// output topics: the whole incoming `Publish` packet (`topic`, `qos`, `retain`, `dup`, `pkid`),
-/// plus `payload` -- see [`payload_value`].
+/// Creates a template context from an incoming [`rumqttc::Publish`] struct.
 pub(crate) fn publish_context(publish: &Publish) -> Value {
     context! {
         topic => publish.topic.as_str(),
@@ -75,10 +74,10 @@ pub(crate) fn publish_context(publish: &Publish) -> Value {
     }
 }
 
-/// Converts a raw payload into a template-friendly value: parsed JSON (indexable) when it's valid
-/// UTF-8 and valid JSON, a plain string when it's valid UTF-8 but not JSON, or a hex string when
-/// it isn't even valid UTF-8 -- so the value is always renderable, but only indexable when the
-/// payload is actually structured.
+/// Converts a raw payload into a template-friendly value:
+/// - Parsed JSON (indexable) when it's valid UTF-8 and valid JSON
+/// - A plain string when it's valid UTF-8 but not JSON
+/// - A hex string when it isn't even valid UTF-8.
 pub(crate) fn payload_value(payload: &[u8]) -> Value {
     match std::str::from_utf8(payload) {
         Ok(text) => match serde_json::from_str::<serde_json::Value>(text) {
