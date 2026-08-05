@@ -119,50 +119,20 @@ impl Error for BoxedDecodeError {
     }
 }
 
-/// Decoders will emit this to a channel whenever they want to publish a new message.
-///
-/// Many decoders will only emit one of these, but some may emit a stream.
-///
-/// The optional fields will be resolved
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct DecodePublish {
-    pub topic: Option<String>,
-    pub qos: Option<QoS>,
-    pub retain: Option<bool>,
-    pub payload: Vec<u8>,
-}
-
-impl DecodePublish {
-    /// Resolves missing publish arguments using the values already present in `incoming` and
-    /// publishes using `client`.
-    pub async fn publish(self, incoming: Publish, client: &AsyncClient) -> Result<(), ClientError> {
-        self.resolve(incoming).publish(client).await
-    }
-
-    fn resolve(self, incoming: Publish) -> ResolvedDecodePublish {
-        ResolvedDecodePublish {
-            topic: self.topic.unwrap_or(format!("{}/decoded", incoming.topic)),
-            qos: self.qos.unwrap_or(incoming.qos),
-            retain: self.retain.unwrap_or(incoming.retain),
-            payload: self.payload.into(),
-        }
-    }
-}
-
-pub struct ResolvedDecodePublish {
-    pub topic: String,
-    pub qos: QoS,
-    pub retain: bool,
-    pub payload: Vec<u8>,
-}
-
-impl ResolvedDecodePublish {
-    async fn publish(self, client: &AsyncClient) -> Result<(), ClientError> {
-        client
-            .publish(self.topic, self.qos, self.retain, self.payload)
-            .await
-    }
-}
+// _______ _____            _____ _______ _____            _   _ _____
+//|__   __|  __ \     /\   |_   _|__   __/ ____|     /\   | \ | |  __ \
+//   | |  | |__) |   /  \    | |    | | | (___      /  \  |  \| | |  | |
+//   | |  |  _  /   / /\ \   | |    | |  \___ \    / /\ \ | . ` | |  | |
+//   | |  | | \ \  / ____ \ _| |_   | |  ____) |  / ____ \| |\  | |__| |
+//   |_|  |_|  \_\/_/    \_\_____|  |_| |_____/  /_/    \_\_| \_|_____/
+//
+//
+//  _____ _______ _____  _    _  _____ _______ _____
+// / ____|__   __|  __ \| |  | |/ ____|__   __/ ____|
+//| (___    | |  | |__) | |  | | |       | | | (___
+// \___ \   | |  |  _  /| |  | | |       | |  \___ \
+// ____) |  | |  | | \ \| |__| | |____   | |  ____) |
+//|_____/   |_|  |_|  \_\\____/ \_____|  |_| |_____/
 
 /// Decodes an incoming MQTT publish into a human-readable string. Implementations get the whole
 /// [`Publish`] packet (topic, QoS, retain, payload, ...), not just the payload bytes, since some
@@ -215,5 +185,50 @@ where
         Decoder::decode(self, publish, tx)
             .await
             .map_err(DecodeError::erase)
+    }
+}
+
+/// Decoders will emit this to a channel whenever they want to publish a new message.
+///
+/// Many decoders will only emit one of these, but some may emit a stream.
+///
+/// The optional fields will be resolved
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DecodePublish {
+    pub topic: Option<String>,
+    pub qos: Option<QoS>,
+    pub retain: Option<bool>,
+    pub payload: Vec<u8>,
+}
+
+impl DecodePublish {
+    /// Resolves missing publish arguments using the values already present in `incoming` and
+    /// publishes using `client`.
+    pub async fn publish(self, incoming: Publish, client: &AsyncClient) -> Result<(), ClientError> {
+        self.resolve(incoming).publish(client).await
+    }
+
+    fn resolve(self, incoming: Publish) -> ResolvedDecodePublish {
+        ResolvedDecodePublish {
+            topic: self.topic.unwrap_or(format!("{}/decoded", incoming.topic)),
+            qos: self.qos.unwrap_or(incoming.qos),
+            retain: self.retain.unwrap_or(incoming.retain),
+            payload: self.payload.into(),
+        }
+    }
+}
+
+pub struct ResolvedDecodePublish {
+    pub topic: String,
+    pub qos: QoS,
+    pub retain: bool,
+    pub payload: Vec<u8>,
+}
+
+impl ResolvedDecodePublish {
+    async fn publish(self, client: &AsyncClient) -> Result<(), ClientError> {
+        client
+            .publish(self.topic, self.qos, self.retain, self.payload)
+            .await
     }
 }
