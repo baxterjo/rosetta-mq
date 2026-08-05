@@ -28,7 +28,7 @@ watch:
 # Publish a message, defaults to a JSON formatted string - exerdecoder on devices/42.
 [arg("message", long, short)]
 [arg("topic", long, short)]
-pub topic="devices/42" message='{"device_id": "sensor-42", "temperature_c": 21.5}':
+pub topic="devices/42/json" message='{"device_id": "sensor-42", "temperature_c": 21.5}':
     mosquitto_pub -h 127.0.0.1 -t "{{ topic }}" -m '{{ message }}'
 
 # Publish a real protobuf-encoded DeviceReading -- exercises the `protobuf` decoder on

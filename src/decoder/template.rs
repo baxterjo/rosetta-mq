@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use minijinja::{context, Environment, Value};
+use minijinja::{Environment, Value, context};
 use rumqttc::Publish;
 use serde::Deserialize;
 use thiserror::Error;
@@ -36,7 +36,7 @@ impl From<UndefinedBehavior> for minijinja::UndefinedBehavior {
 
 /// Per-topic config for the template decoder: the Jinja2-compatible template text itself, written
 /// directly in the TOML config.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct TemplateConfig {
     pub template: String,
     #[serde(default)]

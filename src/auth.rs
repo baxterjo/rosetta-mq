@@ -3,6 +3,13 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
 
+//  _____ ____  _   _ ______ _____ _____
+// / ____/ __ \| \ | |  ____|_   _/ ____|
+//| |   | |  | |  \| | |__    | || |  __
+//| |   | |  | | . ` |  __|   | || | |_ |
+//| |___| |__| | |\  | |     _| || |__| |
+// \_____\____/|_| \_|_|    |_____\_____|
+
 /// Per-broker auth configuration, discriminated by the `method` field in TOML (e.g.
 /// `method = "mtls"`, plus that variant's own fields as siblings -- same "internally tagged"
 /// convention as [`crate::decoder::DecoderConfig`]). A single enum field makes the two methods
@@ -14,63 +21,6 @@ pub enum AuthConfig {
     Mtls(MtlsConfig),
     #[serde(rename = "userpass")]
     UserPass(UserPassConfig),
-}
-
-#[derive(Debug, Deserialize)]
-pub struct MtlsConfig {
-    pub ca_file: PathBuf,
-    pub cert_file: PathBuf,
-    pub key_file: PathBuf,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UserPassConfig {
-    pub username: String,
-    pub password: PasswordSource,
-}
-
-/// Untagged so a plain TOML string picks the literal password, and a `{ env = "..." }` inline
-/// table picks the env-var indirection -- mutually exclusive by construction (a single field),
-/// not by hand-validating two optional fields. The env-var form exists so a real password
-/// doesn't have to live in a config file that might get committed.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum PasswordSource {
-    Env { env: String },
-    Literal(String),
-}
-
-#[derive(Debug, Error)]
-pub enum AuthError {
-    #[error("failed to read {path:?}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("failed to read env var {name:?} for password: {source}")]
-    EnvVar {
-        name: String,
-        #[source]
-        source: std::env::VarError,
-    },
-}
-
-/// The resolved, runtime form of [`AuthConfig`]: certs/keys already read off disk, env vars
-/// already resolved. `Client::connect` consumes this directly and never touches the filesystem
-/// or environment itself -- all fallible I/O happens once, up front, via [`AuthConfig::build`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResolvedAuth {
-    None,
-    Mtls {
-        ca: Vec<u8>,
-        cert: Vec<u8>,
-        key: Vec<u8>,
-    },
-    UserPass {
-        username: String,
-        password: String,
-    },
 }
 
 impl AuthConfig {
@@ -99,6 +49,84 @@ impl AuthConfig {
         }
     }
 }
+
+#[derive(Debug, Deserialize)]
+pub struct MtlsConfig {
+    pub ca_file: PathBuf,
+    pub cert_file: PathBuf,
+    pub key_file: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserPassConfig {
+    pub username: String,
+    pub password: PasswordSource,
+}
+
+/// Untagged so a plain TOML string picks the literal password, and a `{ env = "..." }` inline
+/// table picks the env-var indirection -- mutually exclusive by construction (a single field),
+/// not by hand-validating two optional fields. The env-var form exists so a real password
+/// doesn't have to live in a config file that might get committed.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum PasswordSource {
+    Env { env: String },
+    Literal(String),
+}
+
+// ______ _____  _____   ____  _____   _____
+//|  ____|  __ \|  __ \ / __ \|  __ \ / ____|
+//| |__  | |__) | |__) | |  | | |__) | (___
+//|  __| |  _  /|  _  /| |  | |  _  / \___ \
+//| |____| | \ \| | \ \| |__| | | \ \ ____) |
+//|______|_|  \_\_|  \_\\____/|_|  \_\_____/
+
+#[derive(Debug, Error)]
+pub enum AuthError {
+    #[error("failed to read {path:?}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to read env var {name:?} for password: {source}")]
+    EnvVar {
+        name: String,
+        #[source]
+        source: std::env::VarError,
+    },
+}
+
+// _____  ______  _____  ____  _ __      ________ _____
+//|  __ \|  ____|/ ____|/ __ \| |\ \    / /  ____|  __ \
+//| |__) | |__  | (___ | |  | | | \ \  / /| |__  | |  | |
+//|  _  /|  __|  \___ \| |  | | |  \ \/ / |  __| | |  | |
+//| | \ \| |____ ____) | |__| | |___\  /  | |____| |__| |
+//|_|  \_\______|_____/ \____/|______\/   |______|_____/
+
+/// The resolved, runtime form of [`AuthConfig`]: certs/keys already read off disk, env vars
+/// already resolved. `Client::connect` consumes this directly and never touches the filesystem
+/// or environment itself -- all fallible I/O happens once, up front, via [`AuthConfig::build`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedAuth {
+    None,
+    Mtls {
+        ca: Vec<u8>,
+        cert: Vec<u8>,
+        key: Vec<u8>,
+    },
+    UserPass {
+        username: String,
+        password: String,
+    },
+}
+
+// _    _ _______ _____ _       _____
+//| |  | |__   __|_   _| |     / ____|
+//| |  | |  | |    | | | |    | (___
+//| |  | |  | |    | | | |     \___ \
+//| |__| |  | |   _| |_| |____ ____) |
+// \____/   |_|  |_____|______|_____/
 
 fn read(base_dir: &Path, file: &Path) -> Result<Vec<u8>, AuthError> {
     let path = crate::util::resolve_path(base_dir, file);

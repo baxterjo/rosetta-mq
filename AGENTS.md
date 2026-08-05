@@ -49,7 +49,10 @@ etc.) can subscribe to.
   decode a payload (missing schema match, corrupt bytes, mismatched schema, etc.),
   still republish to the decoded topic with an error-annotated payload (e.g.
   `{"error": "...", "raw_hex": "..."}`) so the mirrored topic always reflects one
-  message per input message.
+  message per input message. This guarantee applies to topics that have a decoder
+  assigned. A topic subscribed with no decoder configured at all is intentional pure
+  pass-through — visible to any other MQTT client via the raw topic, but never
+  mirrored to a decoded or error topic.
 
 These are v1 decisions, not permanent constraints — future work may revisit them
 (e.g. adding heuristic decoding, round-trip encode, or multi-broker support), but

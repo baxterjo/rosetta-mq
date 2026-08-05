@@ -6,7 +6,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::decoder::{DecodeError, DecodePublish, Decoder};
 
-/// Always succeeds; renders the payload as a hex dump. Proves the registry/pipeline wiring
+/// Always succeeds; renders the payload as a hex dump. Proves the registry/engine wiring
 /// without any real decoding logic.
 pub struct HexDumpDecoder;
 

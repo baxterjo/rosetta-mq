@@ -3,7 +3,7 @@ use serde::Deserialize;
 /// Which protocol carries the MQTT connection, discriminated by the `protocol` field in TOML
 /// (e.g. `protocol = "ws"`, plus that variant's own fields as siblings) -- same
 /// "internally tagged" convention as [`crate::decoder::DecoderConfig`]. Defaults to `mqtt` (plain
-/// TCP, optionally wrapped in TLS via `[broker].tls`) when omitted. `ws` connects over a
+/// TCP, optionally wrapped in TLS via `[connection].tls`) when omitted. `ws` connects over a
 /// websocket upgrade instead.
 #[derive(Debug, Default, Deserialize)]
 #[serde(tag = "protocol", rename_all = "lowercase")]

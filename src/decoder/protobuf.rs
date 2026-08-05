@@ -14,7 +14,7 @@ use crate::util::resolve_path;
 /// message type within it to decode payloads as, and any extra include paths the schema's
 /// `import`s need to resolve. `proto_file`/`include_paths` are resolved relative to the config
 /// file's directory (see `ProtobufDecoder::from_config`), not the process's current directory.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ProtobufConfig {
     pub proto_file: String,
     pub message_type: String,

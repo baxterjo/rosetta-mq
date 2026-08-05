@@ -35,17 +35,20 @@ fn relative_proto_file_resolves_against_config_directory_not_process_cwd() {
     std::fs::write(
         &config_path,
         r#"
-        [broker]
+        [connection]
         host = "127.0.0.1"
         port = 1883
         client_id = "rosetta-mq"
         tls = false
 
-        [[topic]]
-        topic_filter = "devices/+/raw"
+        [decoder.proto]
         decoder = "protobuf"
         proto_file = "device.proto"
         message_type = "device.v1.DeviceReading"
+
+        [[topic]]
+        topic_filter = "devices/+/raw"
+        decoder = "proto"
     "#,
     )
     .unwrap();
@@ -56,7 +59,13 @@ fn relative_proto_file_resolves_against_config_directory_not_process_cwd() {
 
     let config = Config::load(&config_path).unwrap();
     let base_dir = config_path.parent().unwrap();
-    let result = config.topics[0].decoder.build(base_dir);
+    let result = config.topics[0]
+        .decoder
+        .as_ref()
+        .unwrap()
+        .resolve(&config.decoders)
+        .unwrap()
+        .build(base_dir);
 
     std::fs::remove_dir_all(&test_dir).ok();
 

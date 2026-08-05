@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -12,14 +12,15 @@ use tokio::sync::mpsc::{self, Sender};
 use tokio::time::timeout;
 
 use rosetta_mq::auth::ResolvedAuth;
-use rosetta_mq::client::Client;
-use rosetta_mq::config::{BrokerConfig, Config, PipelineConfig, TopicMapping};
+use rosetta_mq::client::{Client, ConnectionConfig};
+use rosetta_mq::config::{Config, RefOr, TopicMapping};
 use rosetta_mq::decoder::protobuf::ProtobufConfig;
 use rosetta_mq::decoder::template::TemplateConfig;
 use rosetta_mq::decoder::{
     DecodeError, DecodePublish, Decoder, DecoderConfig, DecoderRegistryBuilder,
 };
-use rosetta_mq::pipeline;
+use rosetta_mq::engine;
+use rosetta_mq::engine::EngineConfig;
 use rosetta_mq::protocol::{Protocol, WebsocketConfig};
 use rosetta_mq::topic::TopicFilter;
 use tokio_util::sync::CancellationToken;
@@ -140,7 +141,7 @@ async fn wait_for_port(port: u16) {
     }
 }
 
-/// Runs entirely in one test process: an embedded rumqttd broker, the rosetta-mq pipeline, and
+/// Runs entirely in one test process: an embedded rumqttd broker, the rosetta-mq engine, and
 /// a second "observer" rumqttc client all in-process, over real TCP on a local test port. No
 /// external broker or extra terminal/process is needed.
 #[tokio::test]
@@ -153,9 +154,9 @@ async fn subscribe_decode_republish_end_to_end() {
     });
     wait_for_port(TEST_PORT).await;
 
-    // 2. Wire up the rosetta-mq pipeline against the embedded broker, exactly as main.rs does.
+    // 2. Wire up the rosetta-mq engine against the embedded broker, exactly as main.rs does.
     let app_config = Config {
-        broker: BrokerConfig {
+        connection: ConnectionConfig {
             host: "127.0.0.1".to_string(),
             port: TEST_PORT,
             client_id: "rosetta-mq-test".to_string(),
@@ -167,25 +168,20 @@ async fn subscribe_decode_republish_end_to_end() {
         topics: vec![
             TopicMapping {
                 topic_filter: "devices/+/raw".to_string(),
-                decoder: DecoderConfig::Utf8,
+                decoder: Some(RefOr::Literal(DecoderConfig::Utf8)),
             },
             TopicMapping {
                 topic_filter: "sensors/#".to_string(),
-                decoder: DecoderConfig::Hexdump,
+                decoder: Some(RefOr::Literal(DecoderConfig::Hexdump)),
             },
         ],
-        pipeline: PipelineConfig::default(),
+        decoders: HashMap::new(),
+        engine: EngineConfig::default(),
     };
 
-    let mut builder = DecoderRegistryBuilder::new();
-    for mapping in &app_config.topics {
-        let decoder = mapping.decoder.build(Path::new(".")).unwrap();
-        let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
-        builder.register(filter, decoder).unwrap();
-    }
-    let registry = builder.build();
+    let registry = build_registry(&app_config, Path::new("."));
 
-    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None).unwrap();
+    let conn = Client::connect(&app_config.connection, &ResolvedAuth::None).unwrap();
     Client::subscribe_all(
         &conn.client,
         app_config.topics.iter().map(|t| t.topic_filter.as_str()),
@@ -193,12 +189,12 @@ async fn subscribe_decode_republish_end_to_end() {
     .await
     .unwrap();
 
-    let pipeline_client = conn.client.clone();
-    tokio::spawn(pipeline::run(
+    let engine_client = conn.client.clone();
+    tokio::spawn(engine::run(
         conn.incoming,
-        pipeline_client,
+        engine_client,
         registry,
-        app_config.pipeline.max_concurrent_decodes,
+        app_config.engine.max_concurrent_decodes,
         CancellationToken::new(),
     ));
 
@@ -235,7 +231,7 @@ async fn subscribe_decode_republish_end_to_end() {
         .subscribe("devices/42/raw/decode_error", QoS::AtLeastOnce)
         .await
         .unwrap();
-    // Subscribed with the same '#' breadth as the pipeline's own mapping, so this would also
+    // Subscribed with the same '#' breadth as the engine's own mapping, so this would also
     // catch a feedback loop (`.../decoded/decoded`, etc.) if the guard below regresses.
     test_client
         .subscribe("sensors/#", QoS::AtLeastOnce)
@@ -289,7 +285,7 @@ async fn subscribe_decode_republish_end_to_end() {
         .unwrap();
 
     // We're subscribed via "sensors/#", which also matches the raw topic we just published to,
-    // so we first see our own echoed publish before the pipeline's decoded output.
+    // so we first see our own echoed publish before the engine's decoded output.
     let (echo_topic, _) = timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("timed out waiting for raw echo")
@@ -331,7 +327,7 @@ async fn protobuf_decoder_end_to_end() {
     wait_for_port(PROTOBUF_TEST_PORT).await;
 
     let app_config = Config {
-        broker: BrokerConfig {
+        connection: ConnectionConfig {
             host: "127.0.0.1".to_string(),
             port: PROTOBUF_TEST_PORT,
             client_id: "rosetta-mq-protobuf-test".to_string(),
@@ -342,24 +338,19 @@ async fn protobuf_decoder_end_to_end() {
         },
         topics: vec![TopicMapping {
             topic_filter: "devices/+/proto".to_string(),
-            decoder: DecoderConfig::Protobuf(ProtobufConfig {
+            decoder: Some(RefOr::Literal(DecoderConfig::Protobuf(ProtobufConfig {
                 proto_file: PROTO_FIXTURE.to_string(),
                 message_type: "device.v1.DeviceReading".to_string(),
                 include_paths: vec![FIXTURES_DIR.to_string()],
-            }),
+            }))),
         }],
-        pipeline: PipelineConfig::default(),
+        decoders: HashMap::new(),
+        engine: EngineConfig::default(),
     };
 
-    let mut builder = DecoderRegistryBuilder::new();
-    for mapping in &app_config.topics {
-        let decoder = mapping.decoder.build(Path::new(".")).unwrap();
-        let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
-        builder.register(filter, decoder).unwrap();
-    }
-    let registry = builder.build();
+    let registry = build_registry(&app_config, Path::new("."));
 
-    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None).unwrap();
+    let conn = Client::connect(&app_config.connection, &ResolvedAuth::None).unwrap();
     Client::subscribe_all(
         &conn.client,
         app_config.topics.iter().map(|t| t.topic_filter.as_str()),
@@ -367,12 +358,12 @@ async fn protobuf_decoder_end_to_end() {
     .await
     .unwrap();
 
-    let pipeline_client = conn.client.clone();
-    tokio::spawn(pipeline::run(
+    let engine_client = conn.client.clone();
+    tokio::spawn(engine::run(
         conn.incoming,
-        pipeline_client,
+        engine_client,
         registry,
-        app_config.pipeline.max_concurrent_decodes,
+        app_config.engine.max_concurrent_decodes,
         CancellationToken::new(),
     ));
 
@@ -451,7 +442,7 @@ async fn template_decoder_end_to_end() {
     wait_for_port(TEMPLATE_TEST_PORT).await;
 
     let app_config = Config {
-        broker: BrokerConfig {
+        connection: ConnectionConfig {
             host: "127.0.0.1".to_string(),
             port: TEMPLATE_TEST_PORT,
             client_id: "rosetta-mq-template-test".to_string(),
@@ -462,24 +453,20 @@ async fn template_decoder_end_to_end() {
         },
         topics: vec![TopicMapping {
             topic_filter: "devices/+/raw".to_string(),
-            decoder: DecoderConfig::Template(TemplateConfig {
-                template: "{{ payload.device_id }} reads {{ payload.temperature_c }}C on {{ topic }}"
-                    .to_string(),
+            decoder: Some(RefOr::Literal(DecoderConfig::Template(TemplateConfig {
+                template:
+                    "{{ payload.device_id }} reads {{ payload.temperature_c }}C on {{ topic }}"
+                        .to_string(),
                 ..Default::default()
-            }),
+            }))),
         }],
-        pipeline: PipelineConfig::default(),
+        decoders: HashMap::new(),
+        engine: EngineConfig::default(),
     };
 
-    let mut builder = DecoderRegistryBuilder::new();
-    for mapping in &app_config.topics {
-        let decoder = mapping.decoder.build(Path::new(".")).unwrap();
-        let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
-        builder.register(filter, decoder).unwrap();
-    }
-    let registry = builder.build();
+    let registry = build_registry(&app_config, Path::new("."));
 
-    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None).unwrap();
+    let conn = Client::connect(&app_config.connection, &ResolvedAuth::None).unwrap();
     Client::subscribe_all(
         &conn.client,
         app_config.topics.iter().map(|t| t.topic_filter.as_str()),
@@ -487,12 +474,12 @@ async fn template_decoder_end_to_end() {
     .await
     .unwrap();
 
-    let pipeline_client = conn.client.clone();
-    tokio::spawn(pipeline::run(
+    let engine_client = conn.client.clone();
+    tokio::spawn(engine::run(
         conn.incoming,
-        pipeline_client,
+        engine_client,
         registry,
-        app_config.pipeline.max_concurrent_decodes,
+        app_config.engine.max_concurrent_decodes,
         CancellationToken::new(),
     ));
 
@@ -545,7 +532,7 @@ async fn template_decoder_end_to_end() {
 }
 
 /// Proves the websocket transport carries real traffic end-to-end -- same embedded-broker shape
-/// as `subscribe_decode_republish_end_to_end`, but both the pipeline's connection and the
+/// as `subscribe_decode_republish_end_to_end`, but both the engine's connection and the
 /// observer connection go over `ws://` instead of raw TCP. Doesn't repeat every case from the TCP
 /// test; just proves messages round-trip over websocket the same way they do over TCP.
 #[tokio::test]
@@ -558,7 +545,7 @@ async fn websocket_end_to_end() {
     wait_for_port(WEBSOCKET_TEST_PORT).await;
 
     let app_config = Config {
-        broker: BrokerConfig {
+        connection: ConnectionConfig {
             host: "127.0.0.1".to_string(),
             port: WEBSOCKET_TEST_PORT,
             client_id: "rosetta-mq-websocket-test".to_string(),
@@ -571,20 +558,15 @@ async fn websocket_end_to_end() {
         },
         topics: vec![TopicMapping {
             topic_filter: "devices/+/raw".to_string(),
-            decoder: DecoderConfig::Utf8,
+            decoder: Some(RefOr::Literal(DecoderConfig::Utf8)),
         }],
-        pipeline: PipelineConfig::default(),
+        decoders: HashMap::new(),
+        engine: EngineConfig::default(),
     };
 
-    let mut builder = DecoderRegistryBuilder::new();
-    for mapping in &app_config.topics {
-        let decoder = mapping.decoder.build(Path::new(".")).unwrap();
-        let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
-        builder.register(filter, decoder).unwrap();
-    }
-    let registry = builder.build();
+    let registry = build_registry(&app_config, Path::new("."));
 
-    let conn = Client::connect(&app_config.broker, &ResolvedAuth::None).unwrap();
+    let conn = Client::connect(&app_config.connection, &ResolvedAuth::None).unwrap();
     Client::subscribe_all(
         &conn.client,
         app_config.topics.iter().map(|t| t.topic_filter.as_str()),
@@ -592,12 +574,12 @@ async fn websocket_end_to_end() {
     .await
     .unwrap();
 
-    let pipeline_client = conn.client.clone();
-    tokio::spawn(pipeline::run(
+    let engine_client = conn.client.clone();
+    tokio::spawn(engine::run(
         conn.incoming,
-        pipeline_client,
+        engine_client,
         registry,
-        app_config.pipeline.max_concurrent_decodes,
+        app_config.engine.max_concurrent_decodes,
         CancellationToken::new(),
     ));
 
@@ -723,7 +705,7 @@ async fn bounded_concurrent_decoding() {
         .unwrap();
     let registry = builder.build();
 
-    let broker_cfg = BrokerConfig {
+    let broker_cfg = ConnectionConfig {
         host: "127.0.0.1".to_string(),
         port: CONCURRENCY_TEST_PORT,
         client_id: "rosetta-mq-concurrency-test".to_string(),
@@ -738,10 +720,10 @@ async fn bounded_concurrent_decoding() {
         .await
         .unwrap();
 
-    let pipeline_client = conn.client.clone();
-    tokio::spawn(pipeline::run(
+    let engine_client = conn.client.clone();
+    tokio::spawn(engine::run(
         conn.incoming,
-        pipeline_client,
+        engine_client,
         registry,
         CAP,
         CancellationToken::new(),
@@ -803,7 +785,7 @@ async fn bounded_concurrent_decoding() {
 }
 
 /// Proves cancellation is a graceful shutdown, not an abort: an in-flight decode/publish must
-/// still complete and be republished after `shutdown.cancel()`, and `pipeline::run` must return
+/// still complete and be republished after `shutdown.cancel()`, and `engine::run` must return
 /// once that happens rather than sitting out its full drain timeout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn graceful_shutdown_drains_in_flight_task_before_returning() {
@@ -834,7 +816,7 @@ async fn graceful_shutdown_drains_in_flight_task_before_returning() {
         .unwrap();
     let registry = builder.build();
 
-    let broker_cfg = BrokerConfig {
+    let broker_cfg = ConnectionConfig {
         host: "127.0.0.1".to_string(),
         port: SHUTDOWN_TEST_PORT,
         client_id: "rosetta-mq-shutdown-test".to_string(),
@@ -849,11 +831,11 @@ async fn graceful_shutdown_drains_in_flight_task_before_returning() {
         .await
         .unwrap();
 
-    let pipeline_client = conn.client.clone();
+    let engine_client = conn.client.clone();
     let shutdown = CancellationToken::new();
-    let pipeline_handle = tokio::spawn(pipeline::run(
+    let engine_handle = tokio::spawn(engine::run(
         conn.incoming,
-        pipeline_client,
+        engine_client,
         registry,
         10,
         shutdown.clone(),
@@ -894,14 +876,34 @@ async fn graceful_shutdown_drains_in_flight_task_before_returning() {
 
     shutdown.cancel();
 
-    timeout(Duration::from_secs(2), pipeline_handle)
+    timeout(Duration::from_secs(2), engine_handle)
         .await
-        .expect("pipeline::run did not return promptly after cancellation")
-        .expect("pipeline task panicked");
+        .expect("engine::run did not return promptly after cancellation")
+        .expect("engine task panicked");
 
     let topic = timeout(Duration::from_secs(1), rx.recv())
         .await
         .expect("decoded message was dropped instead of drained on shutdown")
         .expect("channel closed");
     assert_eq!(topic, "shutdown/1/decoded");
+}
+
+/// Mirrors the registry-building loop in `main.rs`: skips topics with no decoder assigned,
+/// resolves named/inline decoder refs, and registers the rest. Shared across the tests above
+/// since each builds its own `Config` by hand rather than loading one from TOML.
+fn build_registry(config: &Config, base_dir: &Path) -> rosetta_mq::decoder::DecoderRegistry {
+    let mut builder = DecoderRegistryBuilder::new();
+    for mapping in &config.topics {
+        let Some(decoder_ref) = mapping.decoder.as_ref() else {
+            continue;
+        };
+        let decoder = decoder_ref
+            .resolve(&config.decoders)
+            .expect("test config decoder ref must resolve")
+            .build(base_dir)
+            .unwrap();
+        let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
+        builder.register(filter, decoder).unwrap();
+    }
+    builder.build()
 }
