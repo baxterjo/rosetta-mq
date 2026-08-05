@@ -18,8 +18,8 @@ pub mod utf8;
 
 pub use registry::{DecoderRegistry, DecoderRegistryBuilder, RegistryEntry, RegistryError};
 
-use context::CompiledTemplate;
 use crate::config::RefOr;
+use context::CompiledTemplate;
 
 //  _____ ____  _   _ ______ _____ _____
 // / ____/ __ \| \ | |  ____|_   _/ ____|
@@ -45,15 +45,6 @@ pub struct DecoderConfig {
     pub decoder: Option<RefOr<DecoderKind>>,
 }
 
-/// The result of [`DecoderConfig::build`]: a ready-to-use decoder plus its two output behaviors,
-/// already resolved from config -- both are ready to use as-is at message time, since only a
-/// codec (e.g. a `.proto` schema) needs a build step; output routing doesn't.
-pub struct BuiltDecoder {
-    pub decoder: Arc<dyn ErasedDecoder>,
-    pub success_output: OutputBehavior,
-    pub error_output: OutputBehavior,
-}
-
 impl DecoderConfig {
     /// Resolves the inner `decoder` ref against `decoders` and builds the codec it names (see
     /// [`DecoderKind::build`]), bundling the result with this mapping's output behaviors. Only
@@ -61,19 +52,34 @@ impl DecoderConfig {
     /// this topic) -- callers check that first, the same way they already skip subscribe-only
     /// topics before doing anything else with them. The ref is assumed already validated (see
     /// `Config::validate`), so an unresolvable name here is a bug, not a user-facing error.
+    /// `topic_filter` is only used to build a fallback name for an inline, unnamed decoder (see
+    /// below) -- it's the caller's own `TopicMapping::topic_filter`.
     pub fn build(
         &self,
+        topic_filter: &str,
         base_dir: &Path,
         decoders: &HashMap<String, DecoderKind>,
     ) -> Result<BuiltDecoder, BuildDecoderError> {
-        let kind = self
+        let decoder_ref = self
             .decoder
             .as_ref()
-            .expect("only called when a decoder is configured")
+            .expect("only called when a decoder is configured");
+        let kind = decoder_ref
             .resolve(decoders)
             .expect("decoder reference validated at config load");
+        let decoder = kind.build(base_dir)?;
+        // A `[decoder.NAME]` reference identifies the decoder better than its codec ever could --
+        // e.g. two `protobuf` topics with different schemas are both just "protobuf" by codec
+        // name, but distinguishable by their config name. An inline, unnamed decoder has no such
+        // name to fall back on, so it falls back to `{topic_filter}-inline-{codec}-decoder`
+        // instead -- identifiable in logs even though nothing in the config named it.
+        let name = match decoder_ref {
+            RefOr::Ref(name) => name.clone(),
+            RefOr::Literal(_) => format!("{topic_filter}-inline-{}-decoder", decoder.name()),
+        };
         Ok(BuiltDecoder {
-            decoder: kind.build(base_dir)?,
+            decoder,
+            name,
             success_output: self.success_output.clone(),
             error_output: self.error_output.clone(),
         })
@@ -313,6 +319,19 @@ impl Error for BoxedDecodeError {
     }
 }
 
+/// The result of [`DecoderConfig::build`]: a ready-to-use decoder plus its two output behaviors,
+/// already resolved from config -- both are ready to use as-is at message time, since only a
+/// codec (e.g. a `.proto` schema) needs a build step; output routing doesn't.
+pub struct BuiltDecoder {
+    pub decoder: Arc<dyn ErasedDecoder>,
+    /// The user-facing identity of this decoder, for logging: the `[decoder.NAME]` this topic
+    /// referenced, if any, or the codec's own built-in name (e.g. `"protobuf"`) for an inline,
+    /// unnamed decoder -- see [`DecoderConfig::build`].
+    pub name: String,
+    pub success_output: OutputBehavior,
+    pub error_output: OutputBehavior,
+}
+
 // _______ _____            _____ _______ _____            _   _ _____
 //|__   __|  __ \     /\   |_   _|__   __/ ____|     /\   | \ | |  __ \
 //   | |  | |__) |   /  \    | |    | | | (___      /  \  |  \| | |  | |
@@ -391,4 +410,39 @@ where
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DecodePublish {
     pub payload: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_uses_the_config_name_for_a_named_decoder_ref() {
+        let mut decoders = HashMap::new();
+        decoders.insert("my_utf8".to_string(), DecoderKind::Utf8);
+        let cfg = DecoderConfig {
+            success_output: default_success_behavior(),
+            error_output: default_error_behavior(),
+            decoder: Some(RefOr::Ref("my_utf8".to_string())),
+        };
+
+        let built = cfg
+            .build("devices/+/raw", Path::new("."), &decoders)
+            .unwrap();
+        assert_eq!(built.name, "my_utf8");
+    }
+
+    #[test]
+    fn build_falls_back_to_a_topic_filter_derived_name_for_an_inline_decoder() {
+        let cfg = DecoderConfig {
+            success_output: default_success_behavior(),
+            error_output: default_error_behavior(),
+            decoder: Some(RefOr::Literal(DecoderKind::Utf8)),
+        };
+
+        let built = cfg
+            .build("devices/+/raw", Path::new("."), &HashMap::new())
+            .unwrap();
+        assert_eq!(built.name, "devices/+/raw-inline-utf8-decoder");
+    }
 }

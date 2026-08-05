@@ -59,7 +59,10 @@ fn relative_proto_file_resolves_against_config_directory_not_process_cwd() {
 
     let config = Config::load(&config_path).unwrap();
     let base_dir = config_path.parent().unwrap();
-    let result = config.topics[0].decoder.build(base_dir, &config.decoders);
+    let topic = &config.topics[0];
+    let result = topic
+        .decoder
+        .build(&topic.topic_filter, base_dir, &config.decoders);
 
     std::fs::remove_dir_all(&test_dir).ok();
 

@@ -145,7 +145,11 @@ fn handle_incoming(
     };
 
     if entry.consume_echo(&message.topic) {
-        tracing::debug!(topic = %message.topic, "own previously published output; not treated as new input");
+        tracing::debug!(
+            topic = %message.topic,
+            decoder = %entry.name,
+            "own previously published output; not treated as new input"
+        );
         return ControlFlow::Continue(());
     }
 
@@ -197,7 +201,11 @@ async fn emit(
             let topic = match args.topic.resolve(incoming, &payload) {
                 Ok(topic) => topic,
                 Err(err) => {
-                    tracing::error!(error = %err, "failed to render output topic template");
+                    tracing::error!(
+                        decoder = %entry.name,
+                        error = %err,
+                        "failed to render output topic template"
+                    );
                     return;
                 }
             };
@@ -206,7 +214,12 @@ async fn emit(
             match client.publish(topic.clone(), qos, retain, payload).await {
                 Ok(()) => entry.mark_published(&topic),
                 Err(err) => {
-                    tracing::error!(topic = %topic, error = %err, "failed to publish decoded message")
+                    tracing::error!(
+                        decoder = %entry.name,
+                        topic = %topic,
+                        error = %err,
+                        "failed to publish decoded message"
+                    )
                 }
             }
         }

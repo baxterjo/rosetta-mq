@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
         }
         let built = mapping
             .decoder
-            .build(&base_dir, &config.decoders)
+            .build(&mapping.topic_filter, &base_dir, &config.decoders)
             .with_context(|| {
                 format!(
                     "building decoder for topic_filter {:?}",
@@ -54,7 +54,13 @@ async fn main() -> anyhow::Result<()> {
         let filter = TopicFilter::parse(&mapping.topic_filter)
             .with_context(|| format!("invalid topic_filter {:?}", mapping.topic_filter))?;
         builder
-            .register(filter, built.decoder, built.success_output, built.error_output)
+            .register(
+                filter,
+                built.name,
+                built.decoder,
+                built.success_output,
+                built.error_output,
+            )
             .with_context(|| format!("registering topic_filter {:?}", mapping.topic_filter))?;
     }
     let registry = builder.build();

@@ -51,11 +51,10 @@ pub enum ConfigError {
 #[derive(Debug, Deserialize)]
 pub struct TopicMapping {
     pub topic_filter: String,
-    /// `decoder.decoder == None` subscribes to `topic_filter` without decoding or republishing
-    /// anything -- a pure pass-through for visibility. `Some` decodes matches, either via a named
-    /// reference into [`Config::decoders`] (`RefOr::Ref`) or an inline literal
-    /// (`RefOr::Literal`). See [`DecoderConfig`]'s own docs for why this is a plain (not
-    /// `Option`-wrapped) flattened field.
+    // #[serde(flatten)] does not work with Option<DecoderConfig> as a partially correct
+    // DecoderConfig will fall back to None when it fails to Deserialize. Instead in
+    // DecoderConfig there is an optional field that will determine if a decoder should
+    // be assigned to the topic.
     #[serde(flatten)]
     pub decoder: DecoderConfig,
 }
@@ -192,7 +191,10 @@ mod tests {
             &config.topics[0].decoder.decoder,
             Some(RefOr::Ref(name)) if name == "utf8"
         ));
-        assert!(matches!(config.decoders.get("utf8"), Some(DecoderKind::Utf8)));
+        assert!(matches!(
+            config.decoders.get("utf8"),
+            Some(DecoderKind::Utf8)
+        ));
         assert!(matches!(
             config.decoders.get("hex"),
             Some(DecoderKind::Hexdump)

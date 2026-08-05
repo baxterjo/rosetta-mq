@@ -850,6 +850,7 @@ async fn bounded_concurrent_decoding() {
     builder
         .register(
             TopicFilter::parse("load/#").unwrap(),
+            "slow".to_string(),
             Arc::new(SlowDecoder {
                 in_flight: Arc::clone(&in_flight),
                 peak: Arc::clone(&peak),
@@ -963,6 +964,7 @@ async fn graceful_shutdown_drains_in_flight_task_before_returning() {
     builder
         .register(
             TopicFilter::parse("shutdown/#").unwrap(),
+            "slow".to_string(),
             Arc::new(SlowDecoder {
                 in_flight,
                 peak,
@@ -1055,10 +1057,19 @@ fn build_registry(config: &Config, base_dir: &Path) -> rosetta_mq::decoder::Deco
         if mapping.decoder.decoder.is_none() {
             continue;
         }
-        let built = mapping.decoder.build(base_dir, &config.decoders).unwrap();
+        let built = mapping
+            .decoder
+            .build(&mapping.topic_filter, base_dir, &config.decoders)
+            .unwrap();
         let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
         builder
-            .register(filter, built.decoder, built.success_output, built.error_output)
+            .register(
+                filter,
+                built.name,
+                built.decoder,
+                built.success_output,
+                built.error_output,
+            )
             .unwrap();
     }
     builder.build()
