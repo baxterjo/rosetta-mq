@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rumqttc::{AsyncClient, Publish};
+use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinSet};
 use tokio::time::timeout;
@@ -19,6 +20,34 @@ const DECODE_CHANNEL_CAPACITY: usize = 8;
 /// abandoning whatever's left -- so a user hitting Ctrl+C isn't stuck waiting on a decode that's
 /// hung (e.g. a wedged child process).
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+//  _____ ____  _   _ ______ _____ _____
+// / ____/ __ \| \ | |  ____|_   _/ ____|
+//| |   | |  | |  \| | |__    | || |  __
+//| |   | |  | | . ` |  __|   | || | |_ |
+//| |___| |__| | |\  | |     _| || |__| |
+// \_____\____/|_| \_|_|    |_____\_____|
+
+#[derive(Debug, Deserialize)]
+pub struct EngineConfig {
+    /// Maximum number of incoming messages decoded and republished concurrently.
+    #[serde(default = "EngineConfig::default_max_concurrent_decodes")]
+    pub max_concurrent_decodes: usize,
+}
+
+impl EngineConfig {
+    fn default_max_concurrent_decodes() -> usize {
+        100
+    }
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_decodes: Self::default_max_concurrent_decodes(),
+        }
+    }
+}
 
 /// Decode/republish loop: for each incoming message, resolves a decoder for its topic and spawns
 /// a task that drains whatever it publishes to `{topic}/decoded` (a decoder may emit zero, one,

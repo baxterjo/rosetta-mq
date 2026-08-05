@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use crate::client::ConnectionConfig;
 use crate::decoder::DecoderConfig;
+use crate::engine::EngineConfig;
 use crate::protocol::Protocol;
 use crate::topic::{TopicError, TopicFilter};
 
@@ -45,27 +46,6 @@ pub enum ConfigError {
         topic_filter: String,
         decoder_ref: String,
     },
-}
-
-#[derive(Debug, Deserialize)]
-pub struct EngineConfig {
-    /// Maximum number of incoming messages decoded and republished concurrently.
-    #[serde(default = "EngineConfig::default_max_concurrent_decodes")]
-    pub max_concurrent_decodes: usize,
-}
-
-impl EngineConfig {
-    fn default_max_concurrent_decodes() -> usize {
-        100
-    }
-}
-
-impl Default for EngineConfig {
-    fn default() -> Self {
-        Self {
-            max_concurrent_decodes: Self::default_max_concurrent_decodes(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]

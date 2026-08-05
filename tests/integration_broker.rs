@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -13,13 +13,14 @@ use tokio::time::timeout;
 
 use rosetta_mq::auth::ResolvedAuth;
 use rosetta_mq::client::{Client, ConnectionConfig};
-use rosetta_mq::config::{Config, EngineConfig, RefOr, TopicMapping};
+use rosetta_mq::config::{Config, RefOr, TopicMapping};
 use rosetta_mq::decoder::protobuf::ProtobufConfig;
 use rosetta_mq::decoder::template::TemplateConfig;
 use rosetta_mq::decoder::{
     DecodeError, DecodePublish, Decoder, DecoderConfig, DecoderRegistryBuilder,
 };
 use rosetta_mq::engine;
+use rosetta_mq::engine::EngineConfig;
 use rosetta_mq::protocol::{Protocol, WebsocketConfig};
 use rosetta_mq::topic::TopicFilter;
 use tokio_util::sync::CancellationToken;
