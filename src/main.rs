@@ -4,7 +4,7 @@ use anyhow::Context;
 use clap::Parser;
 use rosetta_mq::client::Client;
 use rosetta_mq::config::Config;
-use rosetta_mq::decoder::DecoderRegistryBuilder;
+use rosetta_mq::decoder::{BuildDecoderError, DecoderRegistryBuilder};
 use rosetta_mq::engine;
 use rosetta_mq::topic::TopicFilter;
 use tokio_util::sync::CancellationToken;
@@ -37,20 +37,23 @@ async fn main() -> anyhow::Result<()> {
 
     let mut builder = DecoderRegistryBuilder::new();
     for mapping in &config.topics {
-        // No decoder assigned means the topic is subscribe-only: still subscribed below, just
-        // never decoded/republished.
-        if mapping.decoder.decoder.is_none() {
-            continue;
-        }
-        let built = mapping
+        let built = match mapping
             .decoder
             .build(&mapping.topic_filter, &base_dir, &config.decoders)
-            .with_context(|| {
-                format!(
-                    "building decoder for topic_filter {:?}",
-                    mapping.topic_filter
-                )
-            })?;
+        {
+            Ok(built) => built,
+            // No decoder assigned means the topic is subscribe-only: still subscribed below,
+            // just never decoded/republished.
+            Err(BuildDecoderError::NotConfigured) => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "building decoder for topic_filter {:?}",
+                        mapping.topic_filter
+                    )
+                });
+            }
+        };
         let filter = TopicFilter::parse(&mapping.topic_filter)
             .with_context(|| format!("invalid topic_filter {:?}", mapping.topic_filter))?;
         builder

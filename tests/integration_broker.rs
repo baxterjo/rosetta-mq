@@ -18,8 +18,9 @@ use rosetta_mq::decoder::context::CompiledTemplate;
 use rosetta_mq::decoder::protobuf::ProtobufConfig;
 use rosetta_mq::decoder::template::TemplateConfig;
 use rosetta_mq::decoder::{
-    default_error_behavior, default_success_behavior, DecodeError, DecodePublish, Decoder,
-    DecoderConfig, DecoderKind, DecoderRegistryBuilder, OutputBehavior, PublishArgs, TopicSpec,
+    default_error_behavior, default_success_behavior, BuildDecoderError, DecodeError,
+    DecodePublish, Decoder, DecoderConfig, DecoderKind, DecoderRegistryBuilder, OutputBehavior,
+    PublishArgs, TopicSpec,
 };
 use rosetta_mq::engine;
 use rosetta_mq::engine::EngineConfig;
@@ -1054,13 +1055,14 @@ async fn graceful_shutdown_drains_in_flight_task_before_returning() {
 fn build_registry(config: &Config, base_dir: &Path) -> rosetta_mq::decoder::DecoderRegistry {
     let mut builder = DecoderRegistryBuilder::new();
     for mapping in &config.topics {
-        if mapping.decoder.decoder.is_none() {
-            continue;
-        }
-        let built = mapping
+        let built = match mapping
             .decoder
             .build(&mapping.topic_filter, base_dir, &config.decoders)
-            .unwrap();
+        {
+            Ok(built) => built,
+            Err(BuildDecoderError::NotConfigured) => continue,
+            Err(err) => panic!("failed to build decoder: {err}"),
+        };
         let filter = TopicFilter::parse(&mapping.topic_filter).unwrap();
         builder
             .register(

@@ -28,13 +28,7 @@ use context::CompiledTemplate;
 //| |___| |__| | |\  | |     _| || |__| |
 // \_____\____/|_| \_|_|    |_____\_____|
 
-/// Always deserializes successfully on its own -- `success_output`/`error_output` have defaults
-/// and `decoder` is `Option` -- so it's safe to flatten directly onto `TopicMapping` without the
-/// `flatten` + `Option<Struct>` footgun that comes from wrapping the whole thing in `Option`
-/// instead (a deserialize failure partway through a flattened `Option<T>` silently becomes `None`
-/// rather than propagating, since serde/toml can't tell "absent" apart from "present but
-/// invalid" once the struct itself is optional -- see the regression test below). `decoder` being
-/// `None` is what actually means "no decoder assigned, subscribe-only".
+/// Config for how to decode and what the behavior of the output should be.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DecoderConfig {
     /// What should happen when the decoder succeeds?
@@ -42,31 +36,42 @@ pub struct DecoderConfig {
     pub success_output: OutputBehavior,
     #[serde(default = "default_error_behavior")]
     pub error_output: OutputBehavior,
+    /// Some if the incoming message should go through a decoder.
+    /// None if not.
+    // This is formatted this way instead of TopicMapping.decoder: Option<DecoderConfig> because the
+    // combination of #[serde(flatten)] with Option<Struct> will deserialize to None if the struct
+    // is only partially correct.
     pub decoder: Option<RefOr<DecoderKind>>,
 }
 
 impl DecoderConfig {
     /// Resolves the inner `decoder` ref against `decoders` and builds the codec it names (see
-    /// [`DecoderKind::build`]), bundling the result with this mapping's output behaviors. Only
-    /// meaningful to call when `self.decoder` is `Some` (i.e. a decoder is actually configured for
-    /// this topic) -- callers check that first, the same way they already skip subscribe-only
-    /// topics before doing anything else with them. The ref is assumed already validated (see
-    /// `Config::validate`), so an unresolvable name here is a bug, not a user-facing error.
-    /// `topic_filter` is only used to build a fallback name for an inline, unnamed decoder (see
-    /// below) -- it's the caller's own `TopicMapping::topic_filter`.
+    /// [`DecoderKind::build`]), bundling the result with this mapping's output behaviors. Returns
+    /// `Err(BuildDecoderError::NotConfigured)` if `self.decoder` is `None` (a subscribe-only
+    /// topic) -- callers match on that rather than pre-checking `self.decoder.is_some()`
+    /// themselves. `topic_filter` is only used to build a fallback name for an inline, unnamed
+    /// decoder (see below) -- it's the caller's own `TopicMapping::topic_filter`.
+    ///
+    /// A `RefOr::Ref` naming an unknown decoder is caught here too
+    /// (`BuildDecoderError::UnknownDecoderRef`), even though `Config::validate` already checks
+    /// this for any `Config` built via `Config::load`/`Config::parse` and should make it
+    /// unreachable in practice -- a caller constructing a `DecoderConfig` directly (e.g. embedding
+    /// this crate as a library, bypassing `Config::validate` entirely) still gets a real error
+    /// instead of a panic.
     pub fn build(
         &self,
         topic_filter: &str,
         base_dir: &Path,
         decoders: &HashMap<String, DecoderKind>,
     ) -> Result<BuiltDecoder, BuildDecoderError> {
-        let decoder_ref = self
-            .decoder
-            .as_ref()
-            .expect("only called when a decoder is configured");
-        let kind = decoder_ref
-            .resolve(decoders)
-            .expect("decoder reference validated at config load");
+        let decoder_ref = self.decoder.as_ref().ok_or(BuildDecoderError::NotConfigured)?;
+        let kind = match decoder_ref {
+            RefOr::Ref(name) => decoders
+                .get(name)
+                .cloned()
+                .ok_or_else(|| BuildDecoderError::UnknownDecoderRef(name.clone()))?,
+            RefOr::Literal(kind) => kind.clone(),
+        };
         let decoder = kind.build(base_dir)?;
         // A `[decoder.NAME]` reference identifies the decoder better than its codec ever could --
         // e.g. two `protobuf` topics with different schemas are both just "protobuf" by codec
@@ -296,6 +301,16 @@ impl<E: Error + Send + Sync + 'static> DecodeError<E> {
 
 #[derive(Debug, Error)]
 pub enum BuildDecoderError {
+    /// `DecoderConfig::build` was called on a mapping with no decoder assigned (a subscribe-only
+    /// topic) -- not a failure, just something the caller needs to branch on instead of treating
+    /// like every other build error.
+    #[error("no decoder configured for this topic")]
+    NotConfigured,
+    /// A `RefOr::Ref` naming a decoder that isn't in the `decoders` map passed to `build`.
+    /// `Config::validate` already checks this for any config loaded normally, so in practice this
+    /// should only ever surface for a `DecoderConfig` built by hand rather than parsed from TOML.
+    #[error("unknown decoder reference {0:?}")]
+    UnknownDecoderRef(String),
     #[error(transparent)]
     Protobuf(#[from] protobuf::ProtobufDecoderError),
 }
@@ -444,5 +459,32 @@ mod tests {
             .build("devices/+/raw", Path::new("."), &HashMap::new())
             .unwrap();
         assert_eq!(built.name, "devices/+/raw-inline-utf8-decoder");
+    }
+
+    #[test]
+    fn build_returns_not_configured_for_a_subscribe_only_mapping() {
+        let cfg = DecoderConfig {
+            success_output: default_success_behavior(),
+            error_output: default_error_behavior(),
+            decoder: None,
+        };
+
+        let result = cfg.build("devices/+/status", Path::new("."), &HashMap::new());
+        assert!(matches!(result, Err(BuildDecoderError::NotConfigured)));
+    }
+
+    #[test]
+    fn build_returns_unknown_decoder_ref_instead_of_panicking() {
+        let cfg = DecoderConfig {
+            success_output: default_success_behavior(),
+            error_output: default_error_behavior(),
+            decoder: Some(RefOr::Ref("does_not_exist".to_string())),
+        };
+
+        let result = cfg.build("devices/+/raw", Path::new("."), &HashMap::new());
+        assert!(matches!(
+            result,
+            Err(BuildDecoderError::UnknownDecoderRef(name)) if name == "does_not_exist"
+        ));
     }
 }
