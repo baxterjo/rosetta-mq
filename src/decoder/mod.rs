@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::{error::Error, path::Path};
 
-use rumqttc::{AsyncClient, ClientError, Publish, QoS};
+use rumqttc::{AsyncClient, ClientError, Publish};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -16,6 +16,8 @@ pub mod utf8;
 
 pub use registry::{DecoderRegistry, DecoderRegistryBuilder, RegistryError};
 
+use crate::config::RefOr;
+
 //  _____ ____  _   _ ______ _____ _____
 // / ____/ __ \| \ | |  ____|_   _/ ____|
 //| |   | |  | |  \| | |__    | || |  __
@@ -23,14 +25,103 @@ pub use registry::{DecoderRegistry, DecoderRegistryBuilder, RegistryError};
 //| |___| |__| | |\  | |     _| || |__| |
 // \_____\____/|_| \_|_|    |_____\_____|
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct DecoderConfig {
+    /// What should happen when the decoder succeeds?
+    #[serde(default = "default_success_behavior")]
+    pub success_output: OutputBehavior,
+    #[serde(default = "default_error_behavior")]
+    pub error_output: OutputBehavior,
+    pub decoder: RefOr<DecoderKind>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub enum OutputBehavior {
+    Publish(PublishArgs),
+    StdOut,
+    Quiet,
+}
+
+fn default_success_behavior() -> OutputBehavior {
+    OutputBehavior::Publish(PublishArgs {
+        topic: TopicSpec::Suffix("/decoded".to_string()),
+        qos: InheritOr::Literal(QoS::AtMostOnce),
+        retain: InheritOr::Literal(false),
+    })
+}
+
+fn default_error_behavior() -> OutputBehavior {
+    OutputBehavior::Publish(PublishArgs {
+        topic: TopicSpec::Suffix("/decode_error".to_string()),
+        qos: InheritOr::Literal(QoS::AtMostOnce),
+        retain: InheritOr::Literal(false),
+    })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+/// Publish arguments for decoder output.
+pub struct PublishArgs {
+    /// Topic spec for decoder output publish.
+    pub topic: TopicSpec,
+    /// Optional QoS, defaults to the lowest QoS to conserve network resources.
+    ///
+    /// Use `qos = inherit` to inherit QoS from input message.
+    #[serde(default)]
+    pub qos: InheritOr<QoS>,
+    /// Optional retain, defaults to false to conserve broker resources.
+    ///
+    /// Use `retain = inherit` to inherit retain from input message.
+    #[serde(default)]
+    pub retain: InheritOr<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub enum TopicSpec {
+    Literal(String),
+    Prefix(String),
+    Suffix(String),
+    Template(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Deserialize, Default)]
+pub enum QoS {
+    #[default]
+    AtMostOnce = 0,
+    AtLeastOnce = 1,
+    ExactlyOnce = 2,
+}
+
+impl From<QoS> for rumqttc::QoS {
+    fn from(value: QoS) -> Self {
+        match value {
+            QoS::AtMostOnce => Self::AtMostOnce,
+            QoS::AtLeastOnce => Self::AtLeastOnce,
+            QoS::ExactlyOnce => Self::ExactlyOnce,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum InheritOr<T> {
+    Inherit,
+    Literal(T),
+}
+
+impl<T: Default> Default for InheritOr<T> {
+    fn default() -> Self {
+        InheritOr::Literal(T::default())
+    }
+}
+
 /// Per-topic decoder configuration, discriminated by the `decoder` field in TOML (e.g.
 /// `decoder = "protobuf"`, plus that variant's own fields as siblings at the same level -- see
 /// [`protobuf::ProtobufConfig`]). Lives here rather than in `config.rs` because it's
 /// decoder-specific domain knowledge, the same way `config.rs` already depends on
 /// [`crate::topic::TopicFilter`] rather than redefining topic-filter parsing itself.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "decoder")]
-pub enum DecoderConfig {
+#[serde(tag = "kind")]
+pub enum DecoderKind {
     #[serde(rename = "hexdump")]
     Hexdump,
     #[serde(rename = "utf8")]
@@ -41,19 +132,19 @@ pub enum DecoderConfig {
     Template(template::TemplateConfig),
 }
 
-impl DecoderConfig {
+impl DecoderKind {
     /// Constructs the decoder this config describes. Fallible and I/O-bound for schema-based
     /// decoders (e.g. compiling a `.proto` file), so this runs once at registry-build time, not
     /// per message. `base_dir` resolves any relative paths in decoder-specific config (e.g.
     /// `proto_file`) against the config file's directory rather than the process's CWD.
     pub fn build(&self, base_dir: &Path) -> Result<Arc<dyn ErasedDecoder>, BuildDecoderError> {
         match self {
-            DecoderConfig::Hexdump => Ok(Arc::new(hexdump::HexDumpDecoder)),
-            DecoderConfig::Utf8 => Ok(Arc::new(utf8::Utf8Decoder)),
-            DecoderConfig::Protobuf(cfg) => Ok(Arc::new(protobuf::ProtobufDecoder::from_config(
+            DecoderKind::Hexdump => Ok(Arc::new(hexdump::HexDumpDecoder)),
+            DecoderKind::Utf8 => Ok(Arc::new(utf8::Utf8Decoder)),
+            DecoderKind::Protobuf(cfg) => Ok(Arc::new(protobuf::ProtobufDecoder::from_config(
                 cfg, base_dir,
             )?)),
-            DecoderConfig::Template(cfg) => {
+            DecoderKind::Template(cfg) => {
                 Ok(Arc::new(template::TemplateDecoder::from_config(cfg)?))
             }
         }
@@ -196,7 +287,7 @@ where
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DecodePublish {
     pub topic: Option<String>,
-    pub qos: Option<QoS>,
+    pub qos: Option<rumqttc::QoS>,
     pub retain: Option<bool>,
     pub payload: Vec<u8>,
 }
@@ -220,7 +311,7 @@ impl DecodePublish {
 
 pub struct ResolvedDecodePublish {
     pub topic: String,
-    pub qos: QoS,
+    pub qos: rumqttc::QoS,
     pub retain: bool,
     pub payload: Vec<u8>,
 }

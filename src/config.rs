@@ -54,7 +54,7 @@ pub struct TopicMapping {
     /// `None` subscribes to `topic_filter` without decoding or republishing anything -- a pure
     /// pass-through for visibility. `Some` decodes matches, either via a named reference into
     /// [`Config::decoders`] (`RefOr::Ref`) or an inline literal (`RefOr::Literal`).
-    pub decoder: Option<RefOr<DecoderConfig>>,
+    pub decoder: Option<DecoderConfig>,
 }
 
 impl Config {
@@ -121,7 +121,7 @@ impl Config {
 /// Either a name referencing a shared definition elsewhere in the config (`Ref`), or the
 /// definition written out inline (`Literal`). Used for `TopicMapping.decoder` so a topic can
 /// either reuse a named `[decoder.NAME]` table or define a one-off decoder directly on itself.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RefOr<T> {
     Ref(String),
