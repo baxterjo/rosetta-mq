@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::client::ConnectionConfig;
-use crate::decoder::DecoderConfig;
+use crate::decoder::{DecoderConfig, DecoderKind};
 use crate::engine::EngineConfig;
 use crate::protocol::Protocol;
 use crate::topic::{TopicError, TopicFilter};
@@ -18,7 +18,7 @@ pub struct Config {
     /// Named, reusable decoder definitions (`[decoder.NAME]` in TOML), referenced from `[[topic]]`
     /// blocks via `RefOr::Ref`.
     #[serde(rename = "decoder", default)]
-    pub decoders: HashMap<String, DecoderConfig>,
+    pub decoders: HashMap<String, DecoderKind>,
     #[serde(default)]
     pub engine: EngineConfig,
 }
@@ -51,10 +51,12 @@ pub enum ConfigError {
 #[derive(Debug, Deserialize)]
 pub struct TopicMapping {
     pub topic_filter: String,
-    /// `None` subscribes to `topic_filter` without decoding or republishing anything -- a pure
-    /// pass-through for visibility. `Some` decodes matches, either via a named reference into
-    /// [`Config::decoders`] (`RefOr::Ref`) or an inline literal (`RefOr::Literal`).
-    pub decoder: Option<RefOr<DecoderConfig>>,
+    // #[serde(flatten)] does not work with Option<DecoderConfig> as a partially correct
+    // DecoderConfig will fall back to None when it fails to Deserialize. Instead in
+    // DecoderConfig there is an optional field that will determine if a decoder should
+    // be assigned to the topic.
+    #[serde(flatten)]
+    pub decoder: DecoderConfig,
 }
 
 impl Config {
@@ -96,7 +98,7 @@ impl Config {
                     source,
                 }
             })?;
-            if let Some(RefOr::Ref(name)) = &mapping.decoder {
+            if let Some(RefOr::Ref(name)) = &mapping.decoder.decoder {
                 if !self.decoders.contains_key(name) {
                     return Err(ConfigError::UnknownDecoderRef {
                         topic_filter: mapping.topic_filter.clone(),
@@ -121,7 +123,7 @@ impl Config {
 /// Either a name referencing a shared definition elsewhere in the config (`Ref`), or the
 /// definition written out inline (`Literal`). Used for `TopicMapping.decoder` so a topic can
 /// either reuse a named `[decoder.NAME]` table or define a one-off decoder directly on itself.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RefOr<T> {
     Ref(String),
@@ -144,6 +146,7 @@ where
 mod tests {
     use super::*;
     use crate::auth::AuthConfig;
+    use crate::decoder::{OutputBehavior, PublishArgs, TopicSpec};
 
     const VALID: &str = r#"
         [connection]
@@ -153,13 +156,13 @@ mod tests {
         tls = false
 
         [decoder.utf8]
-        decoder = "utf8"
+        kind = "utf8"
 
         [decoder.hex]
-        decoder = "hexdump"
+        kind = "hexdump"
 
         [decoder.proto]
-        decoder = "protobuf"
+        kind = "protobuf"
         proto_file = "schemas/device.proto"
         message_type = "device.v1.DeviceReading"
 
@@ -185,19 +188,19 @@ mod tests {
         assert_eq!(config.topics.len(), 3);
         assert_eq!(config.topics[0].topic_filter, "devices/+/raw");
         assert!(matches!(
-            &config.topics[0].decoder,
+            &config.topics[0].decoder.decoder,
             Some(RefOr::Ref(name)) if name == "utf8"
         ));
         assert!(matches!(
             config.decoders.get("utf8"),
-            Some(DecoderConfig::Utf8)
+            Some(DecoderKind::Utf8)
         ));
         assert!(matches!(
             config.decoders.get("hex"),
-            Some(DecoderConfig::Hexdump)
+            Some(DecoderKind::Hexdump)
         ));
         match config.decoders.get("proto") {
-            Some(DecoderConfig::Protobuf(cfg)) => {
+            Some(DecoderKind::Protobuf(cfg)) => {
                 assert_eq!(cfg.proto_file, "schemas/device.proto");
                 assert_eq!(cfg.message_type, "device.v1.DeviceReading");
                 assert!(cfg.include_paths.is_empty());
@@ -217,7 +220,7 @@ mod tests {
             tls = false
 
             [decoder.json_template]
-            decoder = "template"
+            kind = "template"
             template = """
             topic: {{ topic }}
             device: {{ payload.device_id }}
@@ -231,9 +234,12 @@ mod tests {
         .unwrap();
 
         match config.decoders.get("json_template") {
-            Some(DecoderConfig::Template(cfg)) => {
-                assert!(cfg.template.contains("topic: {{ topic }}"));
-                assert!(cfg.template.contains("device: {{ payload.device_id }}"));
+            Some(DecoderKind::Template(cfg)) => {
+                assert!(cfg.template.source().contains("topic: {{ topic }}"));
+                assert!(cfg
+                    .template
+                    .source()
+                    .contains("device: {{ payload.device_id }}"));
                 assert!(matches!(
                     cfg.undefined_behavior,
                     crate::decoder::template::UndefinedBehavior::Strict
@@ -254,7 +260,7 @@ mod tests {
             tls = false
 
             [decoder.json_template]
-            decoder = "template"
+            kind = "template"
             template = "{{ topic }}"
             undefined_behavior = "lenient"
 
@@ -266,7 +272,7 @@ mod tests {
         .unwrap();
 
         match config.decoders.get("json_template") {
-            Some(DecoderConfig::Template(cfg)) => {
+            Some(DecoderKind::Template(cfg)) => {
                 assert!(matches!(
                     cfg.undefined_behavior,
                     crate::decoder::template::UndefinedBehavior::Lenient
@@ -287,7 +293,7 @@ mod tests {
             tls = false
 
             [decoder.json_template]
-            decoder = "template"
+            kind = "template"
         "#,
         );
         assert!(matches!(err, Err(ConfigError::Parse(_))));
@@ -304,7 +310,7 @@ mod tests {
             tls = false
 
             [decoder.proto]
-            decoder = "protobuf"
+            kind = "protobuf"
             proto_file = "schemas/device.proto"
         "#,
         );
@@ -327,7 +333,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(config.topics[0].decoder.is_none());
+        assert!(config.topics[0].decoder.decoder.is_none());
     }
 
     #[test]
@@ -364,15 +370,114 @@ mod tests {
 
             [[topic]]
             topic_filter = "devices/+/raw"
-            decoder = { decoder = "utf8" }
+            decoder = { kind = "utf8" }
         "#,
         )
         .unwrap();
 
         assert!(matches!(
-            config.topics[0].decoder,
-            Some(RefOr::Literal(DecoderConfig::Utf8))
+            &config.topics[0].decoder.decoder,
+            Some(RefOr::Literal(DecoderKind::Utf8))
         ));
+    }
+
+    #[test]
+    fn parses_explicit_success_output_publish_literal_topic() {
+        let config = Config::parse(
+            r#"
+            [connection]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+            tls = false
+
+            [[topic]]
+            topic_filter = "devices/+/raw"
+            decoder = { kind = "utf8" }
+            success_output = { publish = { topic = { literal = "devices/all/decoded" } } }
+        "#,
+        )
+        .unwrap();
+
+        let mapping = &config.topics[0].decoder;
+        match &mapping.success_output {
+            OutputBehavior::Publish(PublishArgs {
+                topic: TopicSpec::Literal(topic),
+                ..
+            }) => assert_eq!(topic, "devices/all/decoded"),
+            other => panic!("expected literal publish success_output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_template_success_output_topic() {
+        let config = Config::parse(
+            r#"
+            [connection]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+            tls = false
+
+            [[topic]]
+            topic_filter = "devices/+/raw"
+            decoder = { kind = "utf8" }
+            success_output = { publish = { topic = { template = "{{ topic }}/decoded" } } }
+        "#,
+        )
+        .unwrap();
+
+        let mapping = &config.topics[0].decoder;
+        assert!(matches!(
+            &mapping.success_output,
+            OutputBehavior::Publish(PublishArgs {
+                topic: TopicSpec::Template(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_success_output_topic_template_syntax() {
+        let err = Config::parse(
+            r#"
+            [connection]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+            tls = false
+
+            [[topic]]
+            topic_filter = "devices/+/raw"
+            decoder = { kind = "utf8" }
+            success_output = { publish = { topic = { template = "{{ unclosed" } } }
+        "#,
+        );
+        assert!(matches!(err, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn stdout_and_quiet_output_behaviors_parse() {
+        let config = Config::parse(
+            r#"
+            [connection]
+            host = "127.0.0.1"
+            port = 1883
+            client_id = "x"
+            tls = false
+
+            [[topic]]
+            topic_filter = "devices/+/raw"
+            decoder = { kind = "utf8" }
+            success_output = "std_out"
+            error_output = "quiet"
+        "#,
+        )
+        .unwrap();
+
+        let mapping = &config.topics[0].decoder;
+        assert!(matches!(mapping.success_output, OutputBehavior::StdOut));
+        assert!(matches!(mapping.error_output, OutputBehavior::Quiet));
     }
 
     #[test]

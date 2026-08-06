@@ -9,7 +9,7 @@ use tokio::task::{JoinError, JoinSet};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use crate::decoder::{DecodePublish, DecoderRegistry, ErasedDecoder};
+use crate::decoder::{DecoderRegistry, OutputBehavior, RegistryEntry};
 
 /// Bounded so a misbehaving decoder that streams many messages applies backpressure instead of
 /// growing memory unbounded; small since decoded messages are drained concurrently with decode
@@ -49,14 +49,20 @@ impl Default for EngineConfig {
     }
 }
 
-/// Decode/republish loop: for each incoming message, resolves a decoder for its topic and spawns
-/// a task that drains whatever it publishes to `{topic}/decoded` (a decoder may emit zero, one,
-/// or a stream of messages). A decoder that fails republishes an error message plus the raw
-/// payload as hex to `{topic}/decode_error` instead, so a topic with a decoder assigned always
-/// gets one output message per input message. A topic with no decoder configured at all is a
-/// silent no-op by design (subscribed for visibility, never mirrored) — see `handle_incoming`. A
-/// failed publish is logged rather than fatal — one bad publish must not kill the rest of the
-/// subscriber loop.
+/// Decode/republish loop: for each incoming message, resolves a registry entry for its topic and
+/// spawns a task that drains whatever the decoder publishes, routing successful output through
+/// the entry's `success_output` and any terminal decode error through its `error_output` (see
+/// `emit`). A topic with no decoder configured at all is a silent no-op by design (subscribed for
+/// visibility, never mirrored) — see `handle_incoming`. A failed publish is logged rather than
+/// fatal — one bad publish must not kill the rest of the subscriber loop.
+///
+/// Before spawning, `handle_incoming` checks whether the incoming message is this same entry's
+/// own previously published output (see `RegistryEntry::consume_echo`) and skips it if so —
+/// replaces the old blanket "topic ends in /decoded or /decode_error" check, which can't work
+/// once output topics are arbitrary and config-driven. Scoping that check to the entry rather
+/// than the whole registry is what lets decoders be intentionally chained through the broker (one
+/// decoder's output topic feeding another's input filter) without it being mistaken for a
+/// feedback loop.
 ///
 /// Up to `max_concurrent_decodes` messages are decoded and republished concurrently, so a slow or
 /// long-streaming decode doesn't stall messages behind it. Once that many are in flight, intake
@@ -116,7 +122,7 @@ async fn drain(tasks: &mut JoinSet<()>) {
 }
 
 /// Handles one item off `incoming`: `Break` means the channel closed and `run`'s loop should
-/// stop; `Continue` covers everything else (own-topic skip, no-decoder-configured skip, or a
+/// stop; `Continue` covers everything else (own-echo skip, no-decoder-configured skip, or a
 /// spawned task).
 fn handle_incoming(
     message: Option<Publish>,
@@ -128,14 +134,7 @@ fn handle_incoming(
         return ControlFlow::Break(());
     };
 
-    // A `#` (or otherwise broad) topic_filter can match our own `.../decoded` and
-    // `.../decode_error` output topics, which would otherwise cause the engine to decode its
-    // own republished messages forever. Never treat our own output as new input.
-    if message.topic.ends_with("/decoded") || message.topic.ends_with("/decode_error") {
-        return ControlFlow::Continue(());
-    }
-
-    let Some(decoder) = registry.resolve(&message.topic) else {
+    let Some(entry) = registry.resolve(&message.topic) else {
         // No decoder was configured for this topic -- an intentional, expected state (a
         // subscribe-only topic), not a problem, so this doesn't warrant a warning.
         tracing::debug!(
@@ -145,8 +144,17 @@ fn handle_incoming(
         return ControlFlow::Continue(());
     };
 
+    if entry.consume_echo(&message.topic) {
+        tracing::debug!(
+            topic = %message.topic,
+            decoder = %entry.name,
+            "own previously published output; not treated as new input"
+        );
+        return ControlFlow::Continue(());
+    }
+
     let client = client.clone();
-    tasks.spawn(decode_and_publish(decoder, message, client));
+    tasks.spawn(decode_and_publish(entry, message, client));
     ControlFlow::Continue(())
 }
 
@@ -156,36 +164,67 @@ fn reap(result: Result<(), JoinError>) {
     }
 }
 
-async fn decode_and_publish(
-    decoder: Arc<dyn ErasedDecoder>,
-    message: Publish,
-    client: AsyncClient,
-) {
+async fn decode_and_publish(entry: Arc<RegistryEntry>, message: Publish, client: AsyncClient) {
     let (tx, mut rx) = mpsc::channel(DECODE_CHANNEL_CAPACITY);
     // Decode and drain concurrently: the decoder holds `tx` and may block on a full channel
     // mid-decode (e.g. streaming many messages), so the channel must be drained while decode is
     // still running rather than after it completes.
-    let decode = decoder.decode(&message, tx);
+    let decode = entry.decoder.decode(&message, tx);
     let drain = async {
         while let Some(decoded) = rx.recv().await {
-            publish(&client, decoded, &message).await;
+            emit(&entry, &entry.success_output, decoded.payload, &message, &client).await;
         }
     };
     let (result, ()) = tokio::join!(decode, drain);
 
     if let Err(err) = result {
-        let error_payload = DecodePublish {
-            topic: Some(format!("{}/decode_error", message.topic)),
-            payload: format!("error: {err}\nraw_hex: {}", hex::encode(&message.payload))
-                .into_bytes(),
-            ..Default::default()
-        };
-        publish(&client, error_payload, &message).await;
+        let payload =
+            format!("error: {err}\nraw_hex: {}", hex::encode(&message.payload)).into_bytes();
+        emit(&entry, &entry.error_output, payload, &message, &client).await;
     }
 }
 
-async fn publish(client: &AsyncClient, decoded: DecodePublish, incoming: &Publish) {
-    if let Err(err) = decoded.publish(incoming.clone(), client).await {
-        tracing::error!(topic = %incoming.topic, error = %err, "failed to publish decoded message");
+/// Routes one decoded (or error) payload according to `behavior`. Only `OutputBehavior::Publish`
+/// touches the broker, and only a successful publish marks the topic on `entry` (see
+/// `RegistryEntry::mark_published`) -- a failed render or failed publish is logged and the
+/// message is dropped, the same tolerance the rest of the engine already applies to a failed
+/// publish; it must not take down the subscriber loop.
+async fn emit(
+    entry: &RegistryEntry,
+    behavior: &OutputBehavior,
+    payload: Vec<u8>,
+    incoming: &Publish,
+    client: &AsyncClient,
+) {
+    match behavior {
+        OutputBehavior::Publish(args) => {
+            let topic = match args.topic.resolve(incoming, &payload) {
+                Ok(topic) => topic,
+                Err(err) => {
+                    tracing::error!(
+                        decoder = %entry.name,
+                        error = %err,
+                        "failed to render output topic template"
+                    );
+                    return;
+                }
+            };
+            let qos = args.qos.clone().resolve(incoming.qos.into()).into();
+            let retain = args.retain.clone().resolve(incoming.retain);
+            match client.publish(topic.clone(), qos, retain, payload).await {
+                Ok(()) => entry.mark_published(&topic),
+                Err(err) => {
+                    tracing::error!(
+                        decoder = %entry.name,
+                        topic = %topic,
+                        error = %err,
+                        "failed to publish decoded message"
+                    )
+                }
+            }
+        }
+        OutputBehavior::StdOut => println!("{}", String::from_utf8_lossy(&payload)),
+        OutputBehavior::StdErr => eprintln!("{}", String::from_utf8_lossy(&payload)),
+        OutputBehavior::Quiet => {}
     }
 }

@@ -42,7 +42,7 @@ fn relative_proto_file_resolves_against_config_directory_not_process_cwd() {
         tls = false
 
         [decoder.proto]
-        decoder = "protobuf"
+        kind = "protobuf"
         proto_file = "device.proto"
         message_type = "device.v1.DeviceReading"
 
@@ -59,13 +59,10 @@ fn relative_proto_file_resolves_against_config_directory_not_process_cwd() {
 
     let config = Config::load(&config_path).unwrap();
     let base_dir = config_path.parent().unwrap();
-    let result = config.topics[0]
+    let topic = &config.topics[0];
+    let result = topic
         .decoder
-        .as_ref()
-        .unwrap()
-        .resolve(&config.decoders)
-        .unwrap()
-        .build(base_dir);
+        .build(&topic.topic_filter, base_dir, &config.decoders);
 
     std::fs::remove_dir_all(&test_dir).ok();
 
