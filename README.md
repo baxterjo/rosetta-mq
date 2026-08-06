@@ -23,11 +23,11 @@ required).
 
 ## Configuration
 
-`rosetta-mq` reads a TOML config file — `rosetta-mq.toml` in the current
+`rosetta-mq` reads a TOML config file: `rosetta-mq.toml` in the current
 directory by default, or any path passed via `--config`/`-c`. The file has
 three parts: a `[connection]` table, zero or more named `[decoder.NAME]`
 decoder definitions, and one or more `[[topic]]` blocks mapping a topic
-filter to a decoder — or to nothing at all, for a subscribe-only topic.
+filter to a decoder, or to nothing at all, for a subscribe-only topic.
 
 ```toml
 [connection]
@@ -81,10 +81,10 @@ topic_filter = "devices/+/status"
 | `host`                    | Broker hostname or IP address.                |
 | `port`                    | Broker port (e.g. `1883`).                    |
 | `client_id`               | MQTT client ID used for this connection.      |
-| `tls`                     | **Required.** `true`/`false` — whether the connection is encrypted. |
-| `allow_self_signed_certs` | Optional, defaults to `false`. When `tls` is `true`, accept the broker's certificate with no verification at all (no root store, no hostname check) — for self-hosted/dev brokers using a self-signed cert where distributing a CA file isn't practical. |
+| `tls`                     | **Required.** `true`/`false` - whether the connection is encrypted. |
+| `allow_self_signed_certs` | Optional, defaults to `false`. When `tls` is `true`, accept the broker's certificate with no verification at all (no root store, no hostname check), for self-hosted/dev brokers using a self-signed cert where distributing a CA file isn't practical. |
 | `auth`                    | Optional `[connection.auth]` table (see below). Omit entirely for an unauthenticated connection. |
-| `protocol`                | Optional, defaults to `"mqtt"`. `"mqtt"` connects over plain TCP/TLS; `"ws"` connects over a websocket upgrade and takes an additional `path` field — see below. |
+| `protocol`                | Optional, defaults to `"mqtt"`. `"mqtt"` connects over plain TCP/TLS; `"ws"` connects over a websocket upgrade and takes an additional `path` field (see below). |
 
 
 ### `[connection.auth]`
@@ -100,7 +100,7 @@ cert_file = "certs/client.pem"
 key_file = "certs/client.key"
 ```
 
-(`tls = true` must also be set on `[connection]` — see above.)
+(`tls = true` must also be set on `[connection]`; see above.)
 
 ```toml
 [connection.auth]
@@ -117,7 +117,7 @@ password = { env = "MQTT_PASSWORD" } # or a literal string: password = "supersec
 ### `protocol = "ws"`
 
 Set `protocol = "ws"` when the broker only exposes MQTT over a websocket
-upgrade — common for browser-facing and cloud-hosted brokers. `ws`-vs-`wss`
+upgrade, common for browser-facing and cloud-hosted brokers. `ws`-vs-`wss`
 follows the same `tls` flag already documented above for plain TCP. `path`
 is only meaningful (and only allowed) alongside `protocol = "ws"`.
 
@@ -136,10 +136,10 @@ path = "/mqtt"
 ### `[[topic]]`
 
 Each block matches incoming messages against `topic_filter` (a standard MQTT
-topic filter — supports `+` and `#` wildcards).
+topic filter: supports `+` and `#` wildcards).
 
 `decoder` is optional. Omit it entirely and `rosetta-mq` still subscribes to
-`topic_filter` — any other MQTT client can observe that raw traffic — but
+`topic_filter` (any other MQTT client can observe that raw traffic), but
 never republishes anything for it. When present, `decoder` is either:
 - a string naming a `[decoder.NAME]` table defined elsewhere in the config
   (see below), for a codec shared across multiple topics; or
@@ -148,21 +148,21 @@ never republishes anything for it. When present, `decoder` is either:
   `decoder = { kind = "utf8" }`.
 
 If more than one `[[topic]]` block matches the same incoming topic, the most
-specific one wins — an exact-match filter is preferred over a wildcard filter
+specific one wins: an exact-match filter is preferred over a wildcard filter
 that also matches (e.g. `devices/42` beats `devices/#`).
 
 Each block also optionally sets `success_output`/`error_output`, controlling
-where a decoded message (or a decode error) goes — see
+where a decoded message (or a decode error) goes: see
 [`success_output` / `error_output`](#success_output--error_output) below.
 Both default to publishing to `{topic}/decoded` and `{topic}/decode_error`
 respectively.
 
 ### `[decoder.NAME]`
 
-Each named table defines one reusable **codec** — what the payload is and how
-to decode it — referenced by name (`NAME`) from any number of `[[topic]]`
+Each named table defines one reusable **codec** (what the payload is and how
+to decode it), referenced by name (`NAME`) from any number of `[[topic]]`
 blocks via `decoder = "NAME"`. Every table needs its own `kind` field naming
-which built-in decoder type it is, plus that type's own fields as siblings —
+which built-in decoder type it is, plus that type's own fields as siblings:
 same shape as the inline literal form described above, just written once and
 referenced by name instead of repeated per topic. Naming a decoder shares
 only the codec: different topics can reuse the same named codec while
@@ -172,23 +172,23 @@ Built-in decoders:
 
 | `kind`       | Extra fields                                                                 | Description                                      |
 |--------------|-------------------------------------------------------------------------------|---------------------------------------------------|
-| `"utf8"`     | —                                                                              | Decodes the payload as UTF-8 text. (Mostly used for testing)                |
-| `"hexdump"`  | —                                                                              | Renders the raw payload bytes as hex.             |
+| `"utf8"`     | -                                                                              | Decodes the payload as UTF-8 text. (Mostly used for testing)                |
+| `"hexdump"`  | -                                                                              | Renders the raw payload bytes as hex.             |
 | `"protobuf"` | `proto_file`, `message_type`, `include_paths` (optional)                     | Decodes a Protobuf payload to JSON using a schema.|
 | `"template"` | `template`, `undefined_behavior` (optional)                                   | Renders the message through a user-authored Jinja2-compatible template.|
 
 For `"protobuf"`:
-- `proto_file` — path to the `.proto` file defining the message, resolved
+- `proto_file`: path to the `.proto` file defining the message, resolved
   relative to the config file's own directory.
-- `message_type` — fully-qualified message type to decode the payload as
+- `message_type`: fully-qualified message type to decode the payload as
   (e.g. `device.v1.DeviceReading`).
-- `include_paths` — optional list of extra directories to search when
+- `include_paths`: optional list of extra directories to search when
   resolving `import`s in the schema, also resolved relative to the config
   file's directory. `proto_file`'s own directory is always searched; this is
   only needed for imports that live elsewhere.
 
 For `"template"`:
-- `template` — the template text itself, written inline in the config
+- `template`: the template text itself, written inline in the config
   (typically as a TOML triple-quoted string). Syntax is Jinja2-compatible,
   via the [`minijinja`](https://docs.rs/minijinja) engine.
 - The template has access to every field of the incoming MQTT packet:
@@ -198,8 +198,8 @@ For `"template"`:
   (`{{ payload.device_id }}`, `{{ payload[0] }}`, ...); if it's valid UTF-8
   text but not JSON, `payload` is that text as a plain string; otherwise
   `payload` is the raw bytes hex-encoded as a string.
-- `undefined_behavior` — optional, defaults to `"strict"`. Controls what
-  happens when a template references something undefined — a missing JSON
+- `undefined_behavior`: optional, defaults to `"strict"`. Controls what
+  happens when a template references something undefined: a missing JSON
   key, indexing into a payload that isn't JSON, a typo'd variable name. Where
   the table below says "decode failure", that's treated like any other
   decode failure: routed to `error_output` (with the render error and the raw
@@ -209,7 +209,7 @@ For `"template"`:
   | `"strict"`         | Any use of an undefined value (printing, iterating, attribute access, truthiness) is a decode failure. |
   | `"semi_strict"`    | Like `"strict"`, but checking an undefined value for truthiness (e.g. `{% if maybe_field %}`) is allowed instead of failing. |
   | `"chainable"`      | Attribute access on an undefined value returns another undefined value instead of failing, so a chain like `{{ payload.a.b }}` fails only when printed/iterated, not at the first missing link. |
-  | `"lenient"`        | Undefined values print as an empty string and iterate as empty — matches Jinja2's own default behavior. |
+  | `"lenient"`        | Undefined values print as an empty string and iterate as empty; matches Jinja2's own default behavior. |
 
   Invalid template syntax (for either the `template` decoder or a `template`
   output topic, below) is rejected when the config loads, not on the first
@@ -219,8 +219,8 @@ For `"template"`:
 
 Set on a `[[topic]]` block, these control what happens to a decoder's
 successful output and its decode errors, independently. Both default to
-publishing to a mirrored topic — `{topic}/decoded` for `success_output`,
-`{topic}/decode_error` for `error_output` — matching rosetta-mq's original,
+publishing to a mirrored topic (`{topic}/decoded` for `success_output`,
+`{topic}/decode_error` for `error_output`), matching rosetta-mq's original,
 fixed behavior:
 
 ```toml
@@ -236,7 +236,7 @@ Four forms:
 
 | Form        | Example                                                    | Behavior                                             |
 |-------------|-------------------------------------------------------------|-------------------------------------------------------|
-| `publish`   | `{ publish = { topic = ..., qos = "inherit", retain = false } }` | Publish to the broker — see topic forms below.  |
+| `publish`   | `{ publish = { topic = ..., qos = "inherit", retain = false } }` | Publish to the broker: see topic forms below.  |
 | `"std_out"` | `success_output = "std_out"`                                | Print to stdout instead of publishing.                |
 | `"std_err"` | `error_output = "std_err"`                                  | Print to stderr instead of publishing.                |
 | `"quiet"`   | `success_output = "quiet"`                                  | Run the decoder, but don't emit its output anywhere.   |
@@ -248,7 +248,7 @@ Four forms:
 | `literal`  | `{ literal = "devices/all/decoded" }`    | Always this exact topic.                                                |
 | `prefix`   | `{ prefix = "decoded/" }`                | `prefix` + the incoming topic, e.g. `decoded/devices/42`.               |
 | `suffix`   | `{ suffix = "/decoded" }`                | The incoming topic + `suffix` (the default shape).                      |
-| `template` | `{ template = "{{ topic }}/decoded" }`   | Rendered with the same template engine as the `template` decoder — `topic`, `qos`, `retain`, `dup`, `pkid`, and `payload` (the *original* incoming payload), plus `output` (the decoder's output for this message). A template that fails to *render* for a specific message (e.g. an undefined reference) is logged and that one output is dropped, the same tolerance as a failed publish. |
+| `template` | `{ template = "{{ topic }}/decoded" }`   | Rendered with the same template engine as the `template` decoder: `topic`, `qos`, `retain`, `dup`, `pkid`, and `payload` (the *original* incoming payload), plus `output` (the decoder's output for this message). A template that fails to *render* for a specific message (e.g. an undefined reference) is logged and that one output is dropped, the same tolerance as a failed publish. |
 
 `publish`'s `qos` and `retain` default to the lowest QoS and `false`
 respectively, to conserve broker/network resources; set either to
@@ -257,7 +257,7 @@ respectively, to conserve broker/network resources; set either to
 #### Chaining decoders
 
 Because `success_output`/`error_output` can publish to any topic, one
-decoder's output can be another decoder's input — e.g. decode a Protobuf
+decoder's output can be another decoder's input: e.g. decode a Protobuf
 payload, then feed the resulting JSON into a `template` decoder for further
 reshaping, by pointing the first topic's `success_output` at the second
 topic's `topic_filter`. rosetta-mq tracks its own recently published topics
@@ -292,19 +292,19 @@ rosetta-mq --config rosetta-mq.toml
 
 Once running, `rosetta-mq` subscribes to every `topic_filter` in the config.
 For topics with a `decoder` assigned, each incoming message is routed
-according to that topic's `success_output`/`error_output` (see above) — by
+according to that topic's `success_output`/`error_output` (see above); by
 default, published to a mirrored topic on the same broker:
 
-- `{topic}/decoded` — the decoded, human-readable payload, on success.
-- `{topic}/decode_error` — an error message plus the raw payload as hex, if
+- `{topic}/decoded`: the decoded, human-readable payload, on success.
+- `{topic}/decode_error`: an error message plus the raw payload as hex, if
   decoding failed. Every message gets exactly one such outcome, routed via
-  `success_output`/`error_output` — nothing is dropped unless a topic
+  `success_output`/`error_output`, nothing is dropped unless a topic
   explicitly sets `"quiet"`.
 
 For example, a message on `devices/42` produces either `devices/42/decoded`
 or `devices/42/decode_error` by default, or wherever `success_output`/
 `error_output` say instead. Topics with no `decoder` assigned are subscribed
-but not mirrored at all — the raw traffic is visible to any other MQTT
+but not mirrored at all: the raw traffic is visible to any other MQTT
 client, and that's it. Stop `rosetta-mq` at any time with `Ctrl+C`.
 
 ### Trying it locally
